@@ -22,9 +22,23 @@ import numpy
 import scipy
 from pyscf import lib, gto
 from pyscf import scf, df
-from pyscf.solvent.pcm import PI, switch_h
-from pyscf.solvent.grad.pcm import grad_qv, grad_nuc, get_dD_dS, get_dF_dA, grad_switch_h
+from pyscf.solvent.hsm import PI, switch_h
+from pyscf.solvent.grad.hsm import grad_qv, grad_nuc, get_dD_dS, get_dF_dA, grad_switch_h
 from pyscf.lib import logger
+
+
+def _sync_cavity_coords(pcmobj):
+    if not hasattr(pcmobj, 'get_cavity_coords'):
+        return
+    cavity_coords = pcmobj.get_cavity_coords()
+    if cavity_coords is None:
+        return
+    cavity_coords = numpy.asarray(cavity_coords, dtype=float)
+    if cavity_coords.shape != (pcmobj.mol.natm, 3):
+        raise ValueError('cavity_coords must have shape (natm, 3); '
+                         f'got {cavity_coords.shape} for natm={pcmobj.mol.natm}')
+    if pcmobj.surface is not None:
+        pcmobj.surface['atom_coords'] = cavity_coords
 
 def gradgrad_switch_h(x):
     ''' 2nd derivative of h(x) '''
@@ -181,6 +195,7 @@ def get_d2D_d2S(surface, with_S=True, with_D=False, stream=None):
     return d2D, d2S
 
 def analytical_hess_nuc(pcmobj, dm, verbose=None):
+    _sync_cavity_coords(pcmobj)
     if not pcmobj._intermediates:
         pcmobj.build()
     dm_cache = pcmobj._intermediates.get('dm', None)
@@ -251,6 +266,7 @@ def analytical_hess_nuc(pcmobj, dm, verbose=None):
     return d2e
 
 def analytical_hess_qv(pcmobj, dm, verbose=None):
+    _sync_cavity_coords(pcmobj)
     if not pcmobj._intermediates:
         pcmobj.build()
     dm_cache = pcmobj._intermediates.get('dm', None)
@@ -428,6 +444,7 @@ def get_v_dot_d2DT_dot_q(d2D, v_left, q_right, natom, gridslice):
     return get_v_dot_d2D_dot_q(d2D.transpose(0,1,3,2), v_left, q_right, natom, gridslice)
 
 def analytical_hess_solver(pcmobj, dm, verbose=None):
+    _sync_cavity_coords(pcmobj)
     if not pcmobj._intermediates:
         pcmobj.build()
     dm_cache = pcmobj._intermediates.get('dm', None)
@@ -723,6 +740,7 @@ def analytical_hess_solver(pcmobj, dm, verbose=None):
     return d2e
 
 def get_dqsym_dx_fix_vgrids(pcmobj, atmlst):
+    _sync_cavity_coords(pcmobj)
     assert pcmobj._intermediates is not None
 
     gridslice    = pcmobj.surface['gslice_by_atom']
@@ -917,6 +935,7 @@ def get_dvgrids(pcmobj, dm, atmlst):
     return dV_on_charge_dx
 
 def get_dqsym_dx_fix_K_R(pcmobj, dm, atmlst):
+    _sync_cavity_coords(pcmobj)
     dV_on_charge_dx = get_dvgrids(pcmobj, dm, atmlst)
     K = pcmobj._intermediates['K']
     R = pcmobj._intermediates['R']
@@ -935,6 +954,7 @@ def analytical_grad_vmat(pcmobj, dm, atmlst=None, verbose=None):
     '''
     dv_solv / da
     '''
+    _sync_cavity_coords(pcmobj)
     if not pcmobj._intermediates:
         pcmobj.build()
     dm_cache = pcmobj._intermediates.get('dm', None)

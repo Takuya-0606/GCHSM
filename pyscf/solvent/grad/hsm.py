@@ -238,169 +238,21 @@ def grad_qv(pcmobj, dm, q_sym = None):
 
 
 def grad_solver(pcmobj, dm):
+    r'''Fixed-cavity solver contribution for GC-HSM.
+
+    In the harmonic solvation model (HSM), the cavity is frozen during
+    differentiation. Consequently, the PCM matrices K and R do not depend on the
+    nuclear coordinates, so
+
+        d/dR [K^{-1} R] = 0.
+
+    The solvent gradient therefore reduces to q^T (dv/dR), which is already
+    covered by :func:`grad_qv` and :func:`grad_nuc`. The solver term must vanish
+    identically; keeping the generic PCM dK/dR and dR/dR contributions here is
+    inconsistent with the fixed-cavity HSM formalism and reintroduces the
+    spurious cavity-response terms that Eq. (30) removes.
     '''
-    dE = 0.5*v* d(K^-1 R) *v + q*dv
-    v^T* d(K^-1 R)v = v^T*K^-1(dR - dK K^-1R)v = v^T K^-1(dR - dK q)
-    '''
-    mol = pcmobj.mol
-    log = logger.new_logger(mol, mol.verbose)
-    t1 = (logger.process_clock(), logger.perf_counter())
-    if not pcmobj._intermediates:
-        pcmobj.build()
-    dm_cache = pcmobj._intermediates.get('dm', None)
-    if dm_cache is not None and numpy.linalg.norm(dm_cache - dm) < 1e-10:
-        pass
-    else:
-        pcmobj._get_vind(dm)
-
-    _sync_cavity_coords(pcmobj)
-
-    gridslice    = pcmobj.surface['gslice_by_atom']
-    v_grids      = pcmobj._intermediates['v_grids']
-    A            = pcmobj._intermediates['A']
-    D            = pcmobj._intermediates['D']
-    S            = pcmobj._intermediates['S']
-    K            = pcmobj._intermediates['K']
-    q            = pcmobj._intermediates['q']
-
-    vK_1 = numpy.linalg.solve(K.T, v_grids)
-
-    dF, dA = get_dF_dA(pcmobj.surface)
-
-    with_D = pcmobj.method.upper() in ['IEF-PCM', 'IEFPCM', 'SS(V)PE']
-    dD, dS, dSii = get_dD_dS(pcmobj.surface, dF, with_D=with_D, with_S=True)
-
-    if pcmobj.method.upper() in ['IEF-PCM', 'IEFPCM', 'SS(V)PE']:
-        DA = D*A
-
-    epsilon = pcmobj.eps
-
-    #de_dF = v0 * -dSii_dF * q
-    #de += 0.5*numpy.einsum('i,inx->nx', de_dF, dF)
-    # dQ = v^T K^-1 (dR - dK K^-1 R) v
-    de = numpy.zeros([pcmobj.mol.natm,3])
-    if pcmobj.method.upper() in ['C-PCM', 'CPCM', 'COSMO']:
-        dS = dS.transpose([2,0,1])
-        dSii = dSii.transpose([2,0,1])
-
-        # dR = 0, dK = dS
-        de_dS  = 0.5*(vK_1 * dS.dot(q)).T # numpy.einsum('i,xij,j->ix', vK_1, dS, q)
-        de_dS -= 0.5*numpy.einsum('i,xij,j->jx', vK_1, dS, q)
-        de -= numpy.asarray([numpy.sum(de_dS[p0:p1], axis=0) for p0,p1, in gridslice])
-        de -= 0.5*numpy.einsum('i,xij->jx', vK_1*q, dSii) # 0.5*numpy.einsum('i,xij,i->jx', vK_1, dSii, q)
-
-    elif pcmobj.method.upper() in ['IEF-PCM', 'IEFPCM']:
-        dD = dD.transpose([2,0,1])
-        dS = dS.transpose([2,0,1])
-        dSii = dSii.transpose([2,0,1])
-        dA = dA.transpose([2,0,1])
-
-        # dR = f_eps/(2*pi) * (dD*A + D*dA)
-        # dK = dS - f_eps/(2*pi) * (dD*A*S + D*dA*S + D*A*dS)
-        f_epsilon = (epsilon - 1.0)/(epsilon + 1.0)
-        fac = f_epsilon/(2.0*PI)
-
-        Av = A*v_grids
-        de_dR  = 0.5*fac * numpy.einsum('i,xij,j->ix', vK_1, dD, Av)
-        de_dR -= 0.5*fac * numpy.einsum('i,xij,j->jx', vK_1, dD, Av)
-        de_dR  = numpy.asarray([numpy.sum(de_dR[p0:p1], axis=0) for p0,p1 in gridslice])
-
-        vK_1_D = vK_1.dot(D)
-        vK_1_Dv = vK_1_D * v_grids
-        de_dR += 0.5*fac * numpy.einsum('j,xjn->nx', vK_1_Dv, dA)
-
-        de_dS0  = 0.5*numpy.einsum('i,xij,j->ix', vK_1, dS, q)
-        de_dS0 -= 0.5*numpy.einsum('i,xij,j->jx', vK_1, dS, q)
-        de_dS0  = numpy.asarray([numpy.sum(de_dS0[p0:p1], axis=0) for p0,p1 in gridslice])
-
-        vK_1_q = vK_1 * q
-        de_dS0 += 0.5*numpy.einsum('i,xin->nx', vK_1_q, dSii)
-
-        vK_1_DA = numpy.dot(vK_1, DA)
-        de_dS1  = 0.5*numpy.einsum('i,xij,j->ix', vK_1_DA, dS, q)
-        de_dS1 -= 0.5*numpy.einsum('i,xij,j->jx', vK_1_DA, dS, q)
-        de_dS1  = numpy.asarray([numpy.sum(de_dS1[p0:p1], axis=0) for p0,p1 in gridslice])
-
-        vK_1_DAq = vK_1_DA*q
-        de_dS1 += 0.5*numpy.einsum('j,xjn->nx', vK_1_DAq, dSii)
-
-        Sq = numpy.dot(S,q)
-        ASq = A*Sq
-        de_dD  = 0.5*numpy.einsum('i,xij,j->ix', vK_1, dD, ASq)
-        de_dD -= 0.5*numpy.einsum('i,xij,j->jx', vK_1, dD, ASq)
-        de_dD  = numpy.asarray([numpy.sum(de_dD[p0:p1], axis=0) for p0,p1 in gridslice])
-
-        de_dA = 0.5*numpy.einsum('j,xjn->nx', vK_1_D*Sq, dA)
-
-        de_dK = de_dS0 - fac * (de_dD + de_dA + de_dS1)
-        de += de_dR - de_dK
-
-    elif pcmobj.method.upper() in ['SS(V)PE']:
-        dD = dD.transpose([2,0,1])
-        dS = dS.transpose([2,0,1])
-        dSii = dSii.transpose([2,0,1])
-        dA = dA.transpose([2,0,1])
-
-        # dR = f_eps/(2*pi) * (dD*A + D*dA),
-        # dK = dS - f_eps/(4*pi) * (dD*A*S + D*dA*S + D*A*dS + dS*A*DT + S*dA*DT + S*A*dDT)
-        f_epsilon = (epsilon - 1.0)/(epsilon + 1.0)
-        fac_R = f_epsilon/(2.0*PI)
-
-        Av = A*v_grids
-        de_dR  = 0.5*fac_R * numpy.einsum('i,xij,j->ix', vK_1, dD, Av)
-        de_dR -= 0.5*fac_R * numpy.einsum('i,xij,j->jx', vK_1, dD, Av)
-        de_dR  = numpy.asarray([numpy.sum(de_dR[p0:p1], axis=0) for p0,p1 in gridslice])
-
-        vK_1_D = vK_1.dot(D)
-        vK_1_Dv = vK_1_D * v_grids
-        de_dR += 0.5*fac_R * numpy.einsum('j,xjn->nx', vK_1_Dv, dA)
-
-        de_dS0  = 0.5*numpy.einsum('i,xij,j->ix', vK_1, dS, q)
-        de_dS0 -= 0.5*numpy.einsum('i,xij,j->jx', vK_1, dS, q)
-        de_dS0  = numpy.asarray([numpy.sum(de_dS0[p0:p1], axis=0) for p0,p1 in gridslice])
-
-        vK_1_q = vK_1 * q
-        de_dS0 += 0.5*numpy.einsum('i,xin->nx', vK_1_q, dSii)
-
-        vK_1_DA = numpy.dot(vK_1, DA)
-        de_dS1  = 0.5*numpy.einsum('i,xij,j->ix', vK_1_DA, dS, q)
-        de_dS1 -= 0.5*numpy.einsum('i,xij,j->jx', vK_1_DA, dS, q)
-        de_dS1  = numpy.asarray([numpy.sum(de_dS1[p0:p1], axis=0) for p0,p1 in gridslice])
-        vK_1_DAq = vK_1_DA*q
-        de_dS1 += 0.5*numpy.einsum('j,xjn->nx', vK_1_DAq, dSii)
-
-        DT_q = numpy.dot(D.T, q)
-        ADT_q = A * DT_q
-        de_dS1_T  = 0.5*numpy.einsum('i,xij,j->ix', vK_1, dS, ADT_q)
-        de_dS1_T -= 0.5*numpy.einsum('i,xij,j->jx', vK_1, dS, ADT_q)
-        de_dS1_T  = numpy.asarray([numpy.sum(de_dS1_T[p0:p1], axis=0) for p0,p1 in gridslice])
-        vK_1_ADT_q = vK_1 * ADT_q
-        de_dS1_T += 0.5*numpy.einsum('j,xjn->nx', vK_1_ADT_q, dSii)
-
-        Sq = numpy.dot(S,q)
-        ASq = A*Sq
-        de_dD  = 0.5*numpy.einsum('i,xij,j->ix', vK_1, dD, ASq)
-        de_dD -= 0.5*numpy.einsum('i,xij,j->jx', vK_1, dD, ASq)
-        de_dD  = numpy.asarray([numpy.sum(de_dD[p0:p1], axis=0) for p0,p1 in gridslice])
-
-        vK_1_S = numpy.dot(vK_1, S)
-        vK_1_SA = vK_1_S * A
-        de_dD_T  = 0.5*numpy.einsum('i,xij,j->ix', vK_1_SA, -dD.transpose(0,2,1), q)
-        de_dD_T -= 0.5*numpy.einsum('i,xij,j->jx', vK_1_SA, -dD.transpose(0,2,1), q)
-        de_dD_T  = numpy.asarray([numpy.sum(de_dD_T[p0:p1], axis=0) for p0,p1 in gridslice])
-
-        de_dA = 0.5*numpy.einsum('j,xjn->nx', vK_1_D*Sq, dA)
-
-        de_dA_T = 0.5*numpy.einsum('j,xjn->nx', vK_1_S*DT_q, dA)
-
-        fac_K = f_epsilon/(4.0*PI)
-        de_dK = de_dS0 - fac_K * (de_dD + de_dA + de_dS1 + de_dD_T + de_dA_T + de_dS1_T)
-        de += de_dR - de_dK
-
-    else:
-        raise RuntimeError(f"Unknown implicit solvent model: {pcmobj.method}")
-    t1 = log.timer_debug1('grad solver', *t1)
-    return de
+    return numpy.zeros((pcmobj.mol.natm, 3))
 
 def make_grad_object(base_method):
     '''Create nuclear gradients object with solvent contributions for the given

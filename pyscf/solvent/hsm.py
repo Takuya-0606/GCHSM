@@ -557,10 +557,9 @@ class PCM(lib.StreamObject):
         including the derivatives of the solvent itsself and the interactions
         between the solvent and the charge density of the solute.
         '''
-        from pyscf.solvent.grad.hsm import grad_qv, grad_nuc, grad_solver
+        from pyscf.solvent.grad.hsm import grad_qv, grad_nuc
         de_solvent = grad_qv(self, dm)
         de_solvent+= grad_nuc(self, dm)
-        de_solvent+= grad_solver(self, dm)
         return de_solvent
 
     def Hessian(self, hess_method):
@@ -572,7 +571,7 @@ class PCM(lib.StreamObject):
         including the derivatives of the solvent itsself and the interactions
         between the solvent and the charge density of the solute.
         '''
-        from pyscf.solvent.hessian.pcm import (
+        from pyscf.solvent.hessian.hsm import (
             analytical_hess_nuc, analytical_hess_qv, analytical_hess_solver)
         de_solvent  =    analytical_hess_nuc(self, dm, verbose=self.verbose)
         de_solvent +=     analytical_hess_qv(self, dm, verbose=self.verbose)

@@ -1,0 +1,1565 @@
+#INFO: **** input file is /work/hashimoto/python_job.1397/gchsm.py ****
+#!/usr/bin/env python
+from pyscf import gto, scf, dft, cc, solvent, mp
+from pyscf.hessian import thermo
+from pyscf.solvent import pcm, hsm
+import numpy
+import numpy as np
+mol = gto.M(
+    atom = '''
+  O           0.00000000000000      0.00000000000000      0.06865240486852
+  H           0.00000000000000      0.74760659813079     -0.54482630232708
+  H           0.00000000000000     -0.74760659813079     -0.54482630232708
+''',
+    basis   = '6-31g',
+    spin = 0,
+    symmetry=True,
+    unit    = 'angstrom',
+    verbose = 4,
+)
+
+pcm_obj = hsm.PCM(mol)
+pcm_obj.cavity_coords = mol.atom_coords(unit='B')
+pcm_obj.method        = 'C-PCM'
+pcm_obj.eps           = 80.1510
+pcm_obj.vdw_scale     = 1.2
+pcm_obj.lebedev_order = 17
+
+# Calculation level
+# Hartree-Fock
+mymp = scf.RHF(mol).PCM(pcm_obj)
+mymp.kernel()
+# DFT
+#mymp = dft.RKS(mol,xc='b3lypg').PCM(pcm_obj)
+#mymp = dft.RKS(mol,xc='b3lypg')
+#mymp.kernel()
+# MP2
+#mf = scf.RHF(mol)
+#mf.kernel()
+#mymp = mp.MP2(mf).PCM(pcm_obj)
+#mymp.kernel()
+
+def fd_stencil_centered(fd_order: int):
+    stencils = {
+        2: ([-1, 1],
+            [-1/2, 1/2]),
+
+        4: ([-2, -1,  1,  2],
+            [ 1/12, -2/3, 2/3, -1/12]),
+
+        6: ([-3, -2,  -1,  1,   2,   3],
+            [-1/60, 3/20, -3/4, 3/4, -3/20, 1/60]),
+
+        8: ([-4,  -3,   -2,   -1,   1,    2,    3,    4],
+            [ 1/280, -4/105, 1/5, -4/5, 4/5, -1/5, 4/105, -1/280]),
+
+        10: ([-5,  -4,   -3,   -2,   -1,   1,    2,    3,    4,    5],
+             [-1/1260, 5/504, -5/84, 5/21, -5/6, 5/6, -5/21, 5/84, -5/504, 1/1260]),
+
+        12: ([-6,  -5,   -4,   -3,   -2,   -1,   1,    2,    3,    4,    5,    6],
+             [ 1/5544, -1/385, 1/56, -5/63, 15/56, -6/7, 6/7, -15/56, 5/63, -1/56, 1/385, -1/5544])
+    }
+    if fd_order not in stencils:
+        raise ValueError(f"fd_order must be one of {sorted(stencils.keys())}. Got {fd_order}")
+    return stencils[fd_order]
+
+def fd_hessian(mymp, step=5e-3, fd_order=2):
+
+    mol = mymp.mol
+    g = mymp.nuc_grad_method()
+    g_scan = g.as_scanner()
+
+    pmol = mol.copy()
+    pmol.build()
+
+    coords0 = pmol.atom_coords(unit='B')
+    natm = pmol.natm
+    hessian = np.zeros((natm, natm, 3, 3), dtype=float)
+
+    offsets, coeffs = fd_stencil_centered(fd_order)
+
+    for i in range(natm):
+        for j in range(3):
+            disp_unit = np.zeros_like(coords0)
+            disp_unit[i, j] = 1.0
+
+            acc = np.zeros((natm, 3), dtype=float)
+            for k, ck in zip(offsets, coeffs):
+                pmol.set_geom_(coords0 + (k * step) * disp_unit, unit='B')
+                pmol.build()
+                _, gk = g_scan(pmol)
+                acc += ck * np.asarray(gk, dtype=float)
+
+            hessian[i, :, j, :] = acc / step
+
+    for a in range(natm):
+        for b in range(a):
+            hessian[b, a, :, :] = hessian[a, b, :, :].T
+
+    pmol.set_geom_(coords0, unit='B')
+    pmol.build()
+
+    return hessian
+
+# Analytical hessian
+
+#g = mymp.nuc_grad_method()
+#g.kernel()
+#h = mymp.Hessian()
+#hessian = h.kernel()
+
+hessian = fd_hessian(mymp, step=5e-3, fd_order=2)
+    # thermodynamics
+results = thermo.harmonic_analysis(
+        mol, hessian,
+        exclude_trans=False, 
+        exclude_rot=False,  
+        imaginary_freq=False,
+    )
+
+freqs = results['freq_wavenumber'].real
+norm_mode = results['norm_mode']
+
+natm = mol.natm
+print("Frequencies [cm^-1]:")
+for i, w in enumerate(freqs):
+    print(f"{i}: {w:.4f}")
+
+thermo.dump_normal_mode(mol, results)
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='nakailab63-gpu', release='6.14.0-28-generic', version='#28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 25 10:47:01 UTC 2', machine='x86_64')  Threads 4
+Python 3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:16:04) [GCC 11.2.0]
+numpy 1.26.4  scipy 1.17.0  h5py 3.15.1
+Date: Fri Mar 13 14:24:39 2026
+PySCF version 2.12.1
+PySCF path  /home/hashimoto/miniconda3/envs/hsm/lib/python3.12/site-packages/pyscf
+
+[ENV] PYSCF_EXT_PATH /home/hashimoto/miniconda3/envs/cpcm-gcm/lib/python3.10/site-packages/pyscf
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 3
+[INPUT] num. electrons = 10
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 0
+[INPUT] symmetry True subgroup None
+[INPUT] Mole.unit = angstrom
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr   0.0
+[INPUT]  2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr   0.0
+[INPUT]  3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr   0.0
+
+nuclear repulsion = 9.1088347312386
+point group symmetry = C2v
+symmetry origin: [ 0.         0.        -0.1021271]
+symmetry axis x: [-1. -0. -0.]
+symmetry axis y: [0. 1. 0.]
+symmetry axis z: [0. 0. 1.]
+num. orbitals of irrep A1 = 7
+num. orbitals of irrep B1 = 2
+num. orbitals of irrep B2 = 4
+number of shells = 9
+number of NR pGTOs = 30
+number of NR cGTOs = 13
+basis = 6-31g
+ecp = {}
+CPU time:         1.04
+
+
+******** <class 'pyscf.solvent._attach_solvent.PCMSymAdaptedRHF'> ********
+method = PCMSymAdaptedRHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 104 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A1 B1 B2
+Set gradient conv threshold to 3.16228e-05
+Initial guess from minao.
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.000161348280512903
+Solvent Energy = -0.000161348280512903
+init E= -75.8180983389973
+HOMO (B1) = -0.464056843758632  LUMO (A1) = 0.130367653788656
+PCM E_diel = -0.0219603649547363
+Solvent Energy = -0.0219603649547363
+cycle= 1 E= -75.9645924346435  delta_E= -0.146  |g|= 0.398  |ddm|= 1.18
+HOMO (B1) = -0.424546686827093  LUMO (A1) = 0.237531247434531
+PCM E_diel = -0.0155491672611297
+Solvent Energy = -0.0155491672611297
+cycle= 2 E= -75.9892309676916  delta_E= -0.0246  |g|= 0.21  |ddm|= 0.362
+HOMO (B1) = -0.505594044799925  LUMO (A1) = 0.223122125713834
+PCM E_diel = -0.0168419524194814
+Solvent Energy = -0.0168419524194814
+cycle= 3 E= -75.9970533900651  delta_E= -0.00782  |g|= 0.0208  |ddm|= 0.131
+HOMO (B1) = -0.500338614011024  LUMO (A1) = 0.227203027099812
+PCM E_diel = -0.0164963197026395
+Solvent Energy = -0.0164963197026395
+cycle= 4 E= -75.997195138879  delta_E= -0.000142  |g|= 0.00303  |ddm|= 0.0199
+HOMO (B1) = -0.501079996657215  LUMO (A1) = 0.227014185349748
+PCM E_diel = -0.0164755246765615
+Solvent Energy = -0.0164755246765615
+cycle= 5 E= -75.9972006191921  delta_E= -5.48e-06  |g|= 0.000667  |ddm|= 0.00512
+HOMO (B1) = -0.50123090578824  LUMO (A1) = 0.226961953447151
+PCM E_diel = -0.0164715020369092
+Solvent Energy = -0.0164715020369092
+cycle= 6 E= -75.9972009204816  delta_E= -3.01e-07  |g|= 8.39e-05  |ddm|= 0.00142
+HOMO (B1) = -0.501214428646336  LUMO (A1) = 0.226962394898983
+PCM E_diel = -0.0164727184127007
+Solvent Energy = -0.0164727184127007
+cycle= 7 E= -75.9972009245484  delta_E= -4.07e-09  |g|= 1.34e-05  |ddm|= 0.000145
+HOMO (B1) = -0.501209562102682  LUMO (A1) = 0.226962731097639
+PCM E_diel = -0.0164731304939235
+Solvent Energy = -0.0164731304939235
+cycle= 8 E= -75.9972009246767  delta_E= -1.28e-10  |g|= 1.48e-06  |ddm|= 3.08e-05
+HOMO (B1) = -0.501209678419611  LUMO (A1) = 0.226962542044934
+PCM E_diel = -0.0164731805200525
+Solvent Energy = -0.0164731805200525
+Extra cycle  E= -75.997200924678  delta_E= -1.28e-12  |g|= 6.63e-07  |ddm|= 2.5e-06
+converged SCF energy = -75.997200924678
+Create scanner for <class 'pyscf.solvent.grad.pcm.PCMGradients'>
+Create scanner for <class 'pyscf.solvent._attach_solvent.PCMSymAdaptedRHF'>
+
+WARN: Mole.unit (angstrom) is changed to B
+
+New geometry
+   1 O     -0.002645886055   0.000000000000   0.068652404869 AA   -0.005000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 115 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A1 B1 B2
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0164735029651356
+Solvent Energy = -0.0164735029651356
+init E= -75.9971941303852
+HOMO (B1) = -0.501207833443433  LUMO (A1) = 0.226960923621437
+PCM E_diel = -0.0164735362422164
+Solvent Energy = -0.0164735362422164
+cycle= 1 E= -75.9972006576318  delta_E= -6.53e-06  |g|= 4.39e-06  |ddm|= 0.00364
+HOMO (B1) = -0.501208650398715  LUMO (A1) = 0.22696168417136
+PCM E_diel = -0.0164734528507375
+Solvent Energy = -0.0164734528507375
+cycle= 2 E= -75.9972006576368  delta_E= -5e-12  |g|= 2.57e-06  |ddm|= 5.03e-06
+HOMO (B1) = -0.501210199943324  LUMO (A1) = 0.22696137856612
+PCM E_diel = -0.0164734586976875
+Solvent Energy = -0.0164734586976875
+Extra cycle  E= -75.9972006576379  delta_E= -1.09e-12  |g|= 1.36e-06  |ddm|= 2.38e-06
+converged SCF energy = -75.9972006576379
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 115 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0001095924    -0.0000000000     0.0320305577
+1 H     0.0000659890    -0.0035553157    -0.0156741751
+2 H     0.0000659890     0.0035553157    -0.0156741751
+----------------------------------------------
+New geometry
+   1 O      0.002645886055   0.000000000000   0.068652404869 AA    0.005000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 117 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A1 B1 B2
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0164733252947525
+Solvent Energy = -0.0164733252947525
+init E= -75.9971922707085
+HOMO (B1) = -0.501201543388061  LUMO (A1) = 0.22695966833497
+PCM E_diel = -0.0164737953151191
+Solvent Energy = -0.0164737953151191
+cycle= 1 E= -75.9972006575784  delta_E= -8.39e-06  |g|= 1.44e-05  |ddm|= 0.00727
+HOMO (B1) = -0.501206099457762  LUMO (A1) = 0.226961955184051
+PCM E_diel = -0.0164734894247193
+Solvent Energy = -0.0164734894247193
+cycle= 2 E= -75.9972006576229  delta_E= -4.44e-11  |g|= 8.35e-06  |ddm|= 1.54e-05
+HOMO (B1) = -0.501211172395045  LUMO (A1) = 0.226961081318121
+PCM E_diel = -0.0164735126761998
+Solvent Energy = -0.0164735126761998
+Extra cycle  E= -75.9972006576338  delta_E= -1.09e-11  |g|= 4.52e-06  |ddm|= 7.68e-06
+converged SCF energy = -75.9972006576338
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 119 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O     0.0001095927     0.0000000000     0.0320306632
+1 H    -0.0000659892    -0.0035553597    -0.0156742267
+2 H    -0.0000659892     0.0035553597    -0.0156742267
+----------------------------------------------
+New geometry
+   1 O      0.000000000000  -0.002645886055   0.068652404869 AA    0.000000000000  -0.005000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0164736068394449
+Solvent Energy = -0.0164736068394449
+init E= -75.9971955151197
+HOMO (A") = -0.501208422888131  LUMO (A') = 0.226956587753867
+PCM E_diel = -0.0164734460180797
+Solvent Energy = -0.0164734460180797
+cycle= 1 E= -75.9971925200403  delta_E= 3e-06  |g|= 0.000887  |ddm|= 0.00477
+HOMO (A") = -0.50120894039927  LUMO (A') = 0.226958140288025
+PCM E_diel = -0.0164733701256173
+Solvent Energy = -0.0164733701256173
+cycle= 2 E= -75.9971928043288  delta_E= -2.84e-07  |g|= 0.000217  |ddm|= 0.000871
+HOMO (A") = -0.501210386563595  LUMO (A') = 0.226957682950735
+PCM E_diel = -0.0164733641867219
+Solvent Energy = -0.0164733641867219
+cycle= 3 E= -75.9971928300854  delta_E= -2.58e-08  |g|= 4.63e-05  |ddm|= 0.000293
+HOMO (A") = -0.501209063570629  LUMO (A') = 0.226958045427169
+PCM E_diel = -0.0164733237581724
+Solvent Energy = -0.0164733237581724
+cycle= 4 E= -75.9971928316924  delta_E= -1.61e-09  |g|= 6.36e-06  |ddm|= 9.91e-05
+HOMO (A") = -0.501210541209087  LUMO (A') = 0.226957736946696
+PCM E_diel = -0.0164733483204768
+Solvent Energy = -0.0164733483204768
+cycle= 5 E= -75.997192831719  delta_E= -2.66e-11  |g|= 2.27e-06  |ddm|= 1.35e-05
+HOMO (A") = -0.501209464445468  LUMO (A') = 0.22695796825045
+PCM E_diel = -0.0164733275850378
+Solvent Energy = -0.0164733275850378
+Extra cycle  E= -75.9971928317206  delta_E= -1.62e-12  |g|= 1.21e-06  |ddm|= 2.79e-06
+converged SCF energy = -75.9971928317206
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 119 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000    -0.0032372068     0.0320036613
+1 H     0.0000000000    -0.0019463703    -0.0169347801
+2 H     0.0000000000     0.0051850960    -0.0143867269
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.002645886055   0.068652404869 AA    0.000000000000   0.005000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0164743277413176
+Solvent Energy = -0.0164743277413176
+init E= -75.9971869301648
+HOMO (A") = -0.501215375708684  LUMO (A') = 0.226954530684327
+PCM E_diel = -0.0164733894698174
+Solvent Energy = -0.0164733894698174
+cycle= 1 E= -75.9971915850887  delta_E= -4.65e-06  |g|= 0.00177  |ddm|= 0.00617
+HOMO (A") = -0.50120791592575  LUMO (A') = 0.226958633351323
+PCM E_diel = -0.0164733323198922
+Solvent Energy = -0.0164733323198922
+cycle= 2 E= -75.9971927221755  delta_E= -1.14e-06  |g|= 0.000435  |ddm|= 0.00174
+HOMO (A") = -0.50121160210707  LUMO (A') = 0.226957358927584
+PCM E_diel = -0.0164733894488404
+Solvent Energy = -0.0164733894488404
+cycle= 3 E= -75.9971928251784  delta_E= -1.03e-07  |g|= 9.27e-05  |ddm|= 0.000585
+HOMO (A") = -0.501207609728671  LUMO (A') = 0.226958346851217
+PCM E_diel = -0.0164732988017406
+Solvent Energy = -0.0164732988017406
+cycle= 4 E= -75.997192831602  delta_E= -6.42e-09  |g|= 1.34e-05  |ddm|= 0.000198
+HOMO (A") = -0.50121157872818  LUMO (A') = 0.226957512744334
+PCM E_diel = -0.0164733687406856
+Solvent Energy = -0.0164733687406856
+cycle= 5 E= -75.9971928317097  delta_E= -1.08e-10  |g|= 5.53e-06  |ddm|= 2.63e-05
+HOMO (A") = -0.501208851708386  LUMO (A') = 0.226958098514084
+PCM E_diel = -0.0164733165629364
+Solvent Energy = -0.0164733165629364
+Extra cycle  E= -75.9971928317184  delta_E= -8.64e-12  |g|= 2.98e-06  |ddm|= 6.54e-06
+converged SCF energy = -75.9971928317184
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 119 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000     0.0032372500     0.0320037096
+1 H     0.0000000000    -0.0051850823    -0.0143866393
+2 H     0.0000000000     0.0019463243    -0.0169349159
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.066006518814 AA    0.000000000000   0.000000000000   0.124734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A1 B1 B2
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0163421689470801
+Solvent Energy = -0.0163421689470801
+init E= -75.999401309448
+HOMO (B1) = -0.501160980670635  LUMO (A1) = 0.227461710442513
+PCM E_diel = -0.0163975963167601
+Solvent Energy = -0.0163975963167601
+cycle= 1 E= -75.9973548865556  delta_E= 0.00205  |g|= 0.000765  |ddm|= 0.00489
+HOMO (B1) = -0.501291990735766  LUMO (A1) = 0.227362754987981
+PCM E_diel = -0.0164055799289875
+Solvent Energy = -0.0164055799289875
+cycle= 2 E= -75.9973551423385  delta_E= -2.56e-07  |g|= 0.000292  |ddm|= 0.000955
+HOMO (B1) = -0.501150770603765  LUMO (A1) = 0.22740307612172
+PCM E_diel = -0.0164083112288112
+Solvent Energy = -0.0164083112288112
+cycle= 3 E= -75.9973551792603  delta_E= -3.69e-08  |g|= 0.00013  |ddm|= 0.000393
+HOMO (B1) = -0.501181363726012  LUMO (A1) = 0.22739614517765
+PCM E_diel = -0.0164113151359725
+Solvent Energy = -0.0164113151359725
+cycle= 4 E= -75.997355186629  delta_E= -7.37e-09  |g|= 3.54e-05  |ddm|= 0.000182
+HOMO (B1) = -0.501170550971267  LUMO (A1) = 0.227394700816384
+PCM E_diel = -0.0164125981982882
+Solvent Energy = -0.0164125981982882
+cycle= 5 E= -75.9973551875225  delta_E= -8.94e-10  |g|= 2.37e-06  |ddm|= 9.16e-05
+HOMO (B1) = -0.501170430998709  LUMO (A1) = 0.227394644876674
+PCM E_diel = -0.0164125897895634
+Solvent Energy = -0.0164125897895634
+Extra cycle  E= -75.9973551875251  delta_E= -2.66e-12  |g|= 9.14e-07  |ddm|= 2.48e-06
+converged SCF energy = -75.9973551875251
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 119 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O     0.0000000000    -0.0000000000     0.0296771027
+1 H    -0.0000000000    -0.0044889045    -0.0144999675
+2 H    -0.0000000000     0.0044889045    -0.0144999675
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.071298290923 AA    0.000000000000   0.000000000000   0.134734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A1 B1 B2
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0166784447041765
+Solvent Energy = -0.0166784447041765
+init E= -75.9929220600649
+HOMO (B1) = -0.501279081604066  LUMO (A1) = 0.226388489853876
+PCM E_diel = -0.0165643685894092
+Solvent Energy = -0.0165643685894092
+cycle= 1 E= -75.9970337433878  delta_E= -0.00411  |g|= 0.00153  |ddm|= 0.00582
+HOMO (B1) = -0.501000158404382  LUMO (A1) = 0.226593222501558
+PCM E_diel = -0.016547926143466
+Solvent Energy = -0.016547926143466
+cycle= 2 E= -75.9970347714775  delta_E= -1.03e-06  |g|= 0.000595  |ddm|= 0.00192
+HOMO (B1) = -0.501287858300812  LUMO (A1) = 0.226511654221092
+PCM E_diel = -0.0165427215817274
+Solvent Energy = -0.0165427215817274
+cycle= 3 E= -75.9970349202337  delta_E= -1.49e-07  |g|= 0.000265  |ddm|= 0.000776
+HOMO (B1) = -0.501227235345567  LUMO (A1) = 0.226525226596776
+PCM E_diel = -0.0165364612426455
+Solvent Energy = -0.0165364612426455
+cycle= 4 E= -75.9970349514694  delta_E= -3.12e-08  |g|= 7.12e-05  |ddm|= 0.000376
+HOMO (B1) = -0.501248738108568  LUMO (A1) = 0.226528275110798
+PCM E_diel = -0.0165338499148205
+Solvent Energy = -0.0165338499148205
+cycle= 5 E= -75.9970349551145  delta_E= -3.65e-09  |g|= 4.81e-06  |ddm|= 0.000184
+HOMO (B1) = -0.501249213418319  LUMO (A1) = 0.226528468661686
+PCM E_diel = -0.0165338361793444
+Solvent Energy = -0.0165338361793444
+cycle= 6 E= -75.9970349551265  delta_E= -1.19e-11  |g|= 1.07e-06  |ddm|= 7.78e-06
+HOMO (B1) = -0.501248955603849  LUMO (A1) = 0.226528519244847
+PCM E_diel = -0.0165338557333488
+Solvent Energy = -0.0165338557333488
+Extra cycle  E= -75.997034955127  delta_E= -5.97e-13  |g|= 3.96e-07  |ddm|= 1.12e-06
+converged SCF energy = -75.997034955127
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 119 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000    -0.0000000000     0.0343598449
+1 H    -0.0000000000    -0.0026400840    -0.0168363208
+2 H    -0.0000000000     0.0026400840    -0.0168363208
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H     -0.002645886055   0.747606598131  -0.544826302327 AA   -0.005000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0164024036630507
+Solvent Energy = -0.0164024036630507
+init E= -75.9992459961127
+HOMO (A") = -0.501196899831329  LUMO (A') = 0.227030369028023
+PCM E_diel = -0.0164582772423505
+Solvent Energy = -0.0164582772423505
+cycle= 1 E= -75.9972006010438  delta_E= 0.00205  |g|= 0.000765  |ddm|= 0.004
+HOMO (A") = -0.501331052918782  LUMO (A') = 0.226930318851212
+PCM E_diel = -0.0164662878375562
+Solvent Energy = -0.0164662878375562
+cycle= 2 E= -75.9972008570338  delta_E= -2.56e-07  |g|= 0.000293  |ddm|= 0.000954
+HOMO (A") = -0.501189549958612  LUMO (A') = 0.226970791941238
+PCM E_diel = -0.0164689886954591
+Solvent Energy = -0.0164689886954591
+cycle= 3 E= -75.9972008940364  delta_E= -3.7e-08  |g|= 0.00013  |ddm|= 0.000391
+HOMO (A") = -0.501220172681273  LUMO (A') = 0.226963843844817
+PCM E_diel = -0.0164720204333077
+Solvent Energy = -0.0164720204333077
+cycle= 4 E= -75.9972009014865  delta_E= -7.45e-09  |g|= 3.55e-05  |ddm|= 0.000182
+HOMO (A") = -0.501209350003473  LUMO (A') = 0.226962366694459
+PCM E_diel = -0.0164733112781639
+Solvent Energy = -0.0164733112781639
+cycle= 5 E= -75.9972009023892  delta_E= -9.03e-10  |g|= 2.38e-06  |ddm|= 9.19e-05
+HOMO (A") = -0.501209233869871  LUMO (A') = 0.22696230969288
+PCM E_diel = -0.0164733025382178
+Solvent Energy = -0.0164733025382178
+Extra cycle  E= -75.9972009023917  delta_E= -2.5e-12  |g|= 9.18e-07  |ddm|= 2.49e-06
+converged SCF energy = -75.9972009023917
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 119 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O     0.0000663293    -0.0000027264     0.0320274925
+1 H    -0.0000104727    -0.0035545470    -0.0156737583
+2 H    -0.0000390503     0.0035572105    -0.0156715725
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.002645886055   0.747606598131  -0.544826302327 AA    0.005000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0164732620031074
+Solvent Energy = -0.0164732620031074
+init E= -75.9971968852932
+HOMO (A") = -0.5012049616456  LUMO (A') = 0.226961401279021
+PCM E_diel = -0.0164734960740325
+Solvent Energy = -0.0164734960740325
+cycle= 1 E= -75.9972009023739  delta_E= -4.02e-06  |g|= 8.12e-06  |ddm|= 0.00548
+HOMO (A") = -0.501207189994712  LUMO (A') = 0.226962568061697
+PCM E_diel = -0.0164733225867857
+Solvent Energy = -0.0164733225867857
+cycle= 2 E= -75.9972009023878  delta_E= -1.39e-11  |g|= 4.67e-06  |ddm|= 8.31e-06
+HOMO (A") = -0.50121004366941  LUMO (A') = 0.226962038486617
+PCM E_diel = -0.0164733403215322
+Solvent Energy = -0.0164733403215322
+Extra cycle  E= -75.9972009023908  delta_E= -2.98e-12  |g|= 2.55e-06  |ddm|= 4.36e-06
+converged SCF energy = -75.9972009023908
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 119 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000663295    -0.0000027516     0.0320275777
+1 H     0.0000104728    -0.0035545857    -0.0156738386
+2 H     0.0000390504     0.0035572688    -0.0156715727
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.744960712076  -0.544826302327 AA    0.000000000000   1.407771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0164405423577697
+Solvent Energy = -0.0164405423577697
+init E= -75.9982083412554
+HOMO (A") = -0.501293459929564  LUMO (A') = 0.227204652801504
+PCM E_diel = -0.0164629677159976
+Solvent Energy = -0.0164629677159976
+cycle= 1 E= -75.9971784442369  delta_E= 0.00103  |g|= 0.000581  |ddm|= 0.00344
+HOMO (A") = -0.501381934150921  LUMO (A') = 0.227159334036537
+PCM E_diel = -0.0164650405987609
+Solvent Energy = -0.0164650405987609
+cycle= 2 E= -75.9971785571282  delta_E= -1.13e-07  |g|= 0.000162  |ddm|= 0.000575
+HOMO (A") = -0.501306839797711  LUMO (A') = 0.227184244798365
+PCM E_diel = -0.0164650054214607
+Solvent Energy = -0.0164650054214607
+cycle= 3 E= -75.9971785659777  delta_E= -8.85e-09  |g|= 7.27e-05  |ddm|= 0.000179
+HOMO (A") = -0.501330749791287  LUMO (A') = 0.227179880247723
+PCM E_diel = -0.0164659717802454
+Solvent Energy = -0.0164659717802454
+cycle= 4 E= -75.997178567439  delta_E= -1.46e-09  |g|= 1.6e-05  |ddm|= 6.23e-05
+HOMO (A") = -0.501326319491426  LUMO (A') = 0.227180247398703
+PCM E_diel = -0.0164663103688163
+Solvent Energy = -0.0164663103688163
+cycle= 5 E= -75.9971785675983  delta_E= -1.59e-10  |g|= 1.97e-06  |ddm|= 3.22e-05
+HOMO (A") = -0.501326052252995  LUMO (A') = 0.227180201882142
+PCM E_diel = -0.0164663371479707
+Solvent Energy = -0.0164663371479707
+Extra cycle  E= -75.9971785676005  delta_E= -2.25e-12  |g|= 8.34e-07  |ddm|= 2.9e-06
+converged SCF energy = -75.9971785676005
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 119 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000     0.0016279719     0.0310905558
+1 H     0.0000000000    -0.0053887361    -0.0145610071
+2 H     0.0000000000     0.0037838806    -0.0158373174
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.750252484185  -0.544826302327 AA    0.000000000000   1.417771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0165329411447573
+Solvent Energy = -0.0165329411447573
+init E= -75.9951550601629
+HOMO (A") = -0.501158744395734  LUMO (A') = 0.226691180572351
+PCM E_diel = -0.016487315581506
+Solvent Energy = -0.016487315581506
+cycle= 1 E= -75.997213680751  delta_E= -0.00206  |g|= 0.00116  |ddm|= 0.00415
+HOMO (A") = -0.500978658151369  LUMO (A') = 0.22678418523241
+PCM E_diel = -0.0164830009444617
+Solvent Energy = -0.0164830009444617
+cycle= 2 E= -75.9972141297616  delta_E= -4.49e-07  |g|= 0.000328  |ddm|= 0.00115
+HOMO (A") = -0.501131644885841  LUMO (A') = 0.226733641007326
+PCM E_diel = -0.0164831224572531
+Solvent Energy = -0.0164831224572531
+cycle= 3 E= -75.997214165172  delta_E= -3.54e-08  |g|= 0.000148  |ddm|= 0.000359
+HOMO (A") = -0.501083341009169  LUMO (A') = 0.226742383495913
+PCM E_diel = -0.0164811456436352
+Solvent Energy = -0.0164811456436352
+cycle= 4 E= -75.9972141712207  delta_E= -6.05e-09  |g|= 3.19e-05  |ddm|= 0.000127
+HOMO (A") = -0.50109218266051  LUMO (A') = 0.226741681861552
+PCM E_diel = -0.0164804544602468
+Solvent Energy = -0.0164804544602468
+cycle= 5 E= -75.9972141718596  delta_E= -6.39e-10  |g|= 3.94e-06  |ddm|= 6.46e-05
+HOMO (A") = -0.501092733737266  LUMO (A') = 0.226741770837381
+PCM E_diel = -0.0164804000368083
+Solvent Energy = -0.0164804000368083
+Extra cycle  E= -75.9972141718686  delta_E= -9.02e-12  |g|= 1.67e-06  |ddm|= 5.82e-06
+converged SCF energy = -75.9972141718686
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 120 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000    -0.0016110485     0.0329398673
+1 H     0.0000000000    -0.0017446118    -0.0167612332
+2 H     0.0000000000     0.0033322051    -0.0155065204
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.547472188382 AA    0.000000000000   1.412771719385  -1.034572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.016515072272441
+Solvent Energy = -0.016515072272441
+init E= -75.997121744969
+HOMO (A") = -0.501156265025798  LUMO (A') = 0.226777304478506
+PCM E_diel = -0.0165095169663251
+Solvent Energy = -0.0165095169663251
+cycle= 1 E= -75.997119769904  delta_E= 1.98e-06  |g|= 0.000473  |ddm|= 0.00198
+HOMO (A") = -0.501176432357471  LUMO (A') = 0.226781649745111
+PCM E_diel = -0.0165075718501887
+Solvent Energy = -0.0165075718501887
+cycle= 2 E= -75.9971198726519  delta_E= -1.03e-07  |g|= 0.000155  |ddm|= 0.000552
+HOMO (A") = -0.501170989949268  LUMO (A') = 0.226787566386472
+PCM E_diel = -0.0165057851800066
+Solvent Energy = -0.0165057851800066
+cycle= 3 E= -75.9971198876731  delta_E= -1.5e-08  |g|= 3.16e-05  |ddm|= 0.000299
+HOMO (A") = -0.501183696030346  LUMO (A') = 0.226785475383283
+PCM E_diel = -0.0165056760502211
+Solvent Energy = -0.0165056760502211
+cycle= 4 E= -75.9971198881158  delta_E= -4.43e-10  |g|= 1.3e-05  |ddm|= 4.55e-05
+HOMO (A") = -0.501178337534912  LUMO (A') = 0.226786857826502
+PCM E_diel = -0.0165054427819477
+Solvent Energy = -0.0165054427819477
+Extra cycle  E= -75.9971198881781  delta_E= -6.23e-11  |g|= 7.24e-06  |ddm|= 1.75e-05
+converged SCF energy = -75.9971198881781
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 120 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000    -0.0012657596     0.0331917414
+1 H     0.0000000000    -0.0024648290    -0.0167426240
+2 H     0.0000000000     0.0037218675    -0.0157376905
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.542180416272 AA    0.000000000000   1.412771719385  -1.024572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0163707892265523
+Solvent Energy = -0.0163707892265523
+init E= -75.9993238409669
+HOMO (A") = -0.501227583135402  LUMO (A') = 0.227203003422941
+PCM E_diel = -0.0164263461452545
+Solvent Energy = -0.0164263461452545
+cycle= 1 E= -75.9972760686037  delta_E= 0.00205  |g|= 0.00107  |ddm|= 0.0044
+HOMO (A") = -0.501357260390478  LUMO (A') = 0.227105010435701
+PCM E_diel = -0.0164342455450749
+Solvent Energy = -0.0164342455450749
+cycle= 2 E= -75.9972765233052  delta_E= -4.55e-07  |g|= 0.000357  |ddm|= 0.00124
+HOMO (A") = -0.501208057946985  LUMO (A') = 0.227148179183041
+PCM E_diel = -0.0164371750302092
+Solvent Energy = -0.0164371750302092
+cycle= 3 E= -75.9972765845838  delta_E= -6.13e-08  |g|= 0.00015  |ddm|= 0.000527
+HOMO (A") = -0.501252067069069  LUMO (A') = 0.227137475402234
+PCM E_diel = -0.0164399815342667
+Solvent Energy = -0.0164399815342667
+cycle= 4 E= -75.9972765934758  delta_E= -8.89e-09  |g|= 4.71e-05  |ddm|= 0.000187
+HOMO (A") = -0.501237775424821  LUMO (A') = 0.227137215154305
+PCM E_diel = -0.0164411818280676
+Solvent Energy = -0.0164411818280676
+cycle= 5 E= -75.9972765949175  delta_E= -1.44e-09  |g|= 3.74e-06  |ddm|= 0.000112
+HOMO (A") = -0.501237513741168  LUMO (A') = 0.227136961058301
+PCM E_diel = -0.0164412284560811
+Solvent Energy = -0.0164412284560811
+cycle= 6 E= -75.9972765949257  delta_E= -8.16e-12  |g|= 7.69e-07  |ddm|= 6.97e-06
+HOMO (A") = -0.501237568363486  LUMO (A') = 0.227136942999593
+PCM E_diel = -0.0164412235518815
+Solvent Energy = -0.0164412235518815
+Extra cycle  E= -75.9972765949259  delta_E= -1.85e-13  |g|= 3.02e-07  |ddm|= 9.61e-07
+converged SCF energy = -75.9972765949259
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 120 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000     0.0012821869     0.0308541584
+1 H     0.0000000000    -0.0046648664    -0.0145953136
+2 H     0.0000000000     0.0033913444    -0.0156057456
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H     -0.002645886055  -0.747606598131  -0.544826302327 AA   -0.005000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0165089972970953
+Solvent Energy = -0.0165089972970953
+init E= -75.9961707383084
+HOMO (A") = -0.50121557194349  LUMO (A') = 0.2269280557028
+PCM E_diel = -0.016480916157806
+Solvent Energy = -0.016480916157806
+cycle= 1 E= -75.9972007699497  delta_E= -0.00103  |g|= 0.000538  |ddm|= 0.00351
+HOMO (A") = -0.501147237896491  LUMO (A') = 0.226978600343603
+PCM E_diel = -0.0164768095808338
+Solvent Energy = -0.0164768095808338
+cycle= 2 E= -75.9972008842171  delta_E= -1.14e-07  |g|= 0.000181  |ddm|= 0.000625
+HOMO (A") = -0.501224612422163  LUMO (A') = 0.226956514411923
+PCM E_diel = -0.0164753984207354
+Solvent Energy = -0.0164753984207354
+cycle= 3 E= -75.9972008996357  delta_E= -1.54e-08  |g|= 7.81e-05  |ddm|= 0.000262
+HOMO (A") = -0.501202076142327  LUMO (A') = 0.226961919769979
+PCM E_diel = -0.0164739383734834
+Solvent Energy = -0.0164739383734834
+cycle= 4 E= -75.9972009020223  delta_E= -2.39e-09  |g|= 2.36e-05  |ddm|= 9.7e-05
+HOMO (A") = -0.501209130257894  LUMO (A') = 0.226962105766259
+PCM E_diel = -0.0164733214132427
+Solvent Energy = -0.0164733214132427
+cycle= 5 E= -75.99720090239  delta_E= -3.68e-10  |g|= 1.89e-06  |ddm|= 5.68e-05
+HOMO (A") = -0.501209175154452  LUMO (A') = 0.226962201313407
+PCM E_diel = -0.0164733110634863
+Solvent Energy = -0.0164733110634863
+Extra cycle  E= -75.9972009023918  delta_E= -1.79e-12  |g|= 7.35e-07  |ddm|= 2.36e-06
+converged SCF energy = -75.9972009023918
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 120 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O     0.0000663295     0.0000025991     0.0320277001
+1 H    -0.0000390505    -0.0035571706    -0.0156716699
+2 H    -0.0000104728     0.0035546303    -0.0156738609
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.002645886055  -0.747606598131  -0.544826302327 AA    0.005000000000  -1.412771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0164732705282171
+Solvent Energy = -0.0164732705282171
+init E= -75.9971968852998
+HOMO (A") = -0.501204916502359  LUMO (A') = 0.226961362150805
+PCM E_diel = -0.0164735015581456
+Solvent Energy = -0.0164735015581456
+cycle= 1 E= -75.9972009023738  delta_E= -4.02e-06  |g|= 8.1e-06  |ddm|= 0.00548
+HOMO (A") = -0.501207176911007  LUMO (A') = 0.226962550302804
+PCM E_diel = -0.0164733261588548
+Solvent Energy = -0.0164733261588548
+cycle= 2 E= -75.9972009023877  delta_E= -1.39e-11  |g|= 4.67e-06  |ddm|= 8.43e-06
+HOMO (A") = -0.501210030819866  LUMO (A') = 0.226962032251327
+PCM E_diel = -0.0164733422320367
+Solvent Energy = -0.0164733422320367
+Extra cycle  E= -75.9972009023908  delta_E= -3.07e-12  |g|= 2.54e-06  |ddm|= 4.32e-06
+converged SCF energy = -75.9972009023908
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 120 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000663296     0.0000027451     0.0320276099
+1 H     0.0000390505    -0.0035572640    -0.0156715894
+2 H     0.0000104728     0.0035545871    -0.0156738536
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.750252484185  -0.544826302327 AA    0.000000000000  -1.417771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0165065164306201
+Solvent Energy = -0.0165065164306201
+init E= -75.9961868218282
+HOMO (A") = -0.501123725723127  LUMO (A') = 0.22671662958815
+PCM E_diel = -0.0164838920236373
+Solvent Energy = -0.0164838920236373
+cycle= 1 E= -75.9972140495437  delta_E= -0.00103  |g|= 0.000578  |ddm|= 0.00343
+HOMO (A") = -0.501035708528449  LUMO (A') = 0.226762976331699
+PCM E_diel = -0.0164816995321965
+Solvent Energy = -0.0164816995321965
+cycle= 2 E= -75.9972141613352  delta_E= -1.12e-07  |g|= 0.000164  |ddm|= 0.000573
+HOMO (A") = -0.501112209427146  LUMO (A') = 0.226737744343605
+PCM E_diel = -0.0164817449650016
+Solvent Energy = -0.0164817449650016
+cycle= 3 E= -75.9972141701938  delta_E= -8.86e-09  |g|= 7.38e-05  |ddm|= 0.000179
+HOMO (A") = -0.501088127141785  LUMO (A') = 0.22674210752172
+PCM E_diel = -0.0164807528549734
+Solvent Energy = -0.0164807528549734
+cycle= 4 E= -75.9972141717076  delta_E= -1.51e-09  |g|= 1.6e-05  |ddm|= 6.35e-05
+HOMO (A") = -0.501092572113319  LUMO (A') = 0.226741757282445
+PCM E_diel = -0.0164804051184357
+Solvent Energy = -0.0164804051184357
+cycle= 5 E= -75.9972141718681  delta_E= -1.6e-10  |g|= 1.97e-06  |ddm|= 3.24e-05
+HOMO (A") = -0.501092847097862  LUMO (A') = 0.226741801929464
+PCM E_diel = -0.0164803780137145
+Solvent Energy = -0.0164803780137145
+Extra cycle  E= -75.9972141718703  delta_E= -2.2e-12  |g|= 8.37e-07  |ddm|= 2.91e-06
+converged SCF energy = -75.9972141718703
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 120 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000     0.0016109478     0.0329397320
+1 H     0.0000000000    -0.0033321687    -0.0155065405
+2 H     0.0000000000     0.0017446653    -0.0167610797
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.744960712076  -0.544826302327 AA    0.000000000000  -1.407771719385  -1.029572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0164150367395853
+Solvent Energy = -0.0164150367395853
+init E= -75.9992336912718
+HOMO (A") = -0.501265038731417  LUMO (A') = 0.227228876274318
+PCM E_diel = -0.0164594856367688
+Solvent Energy = -0.0164594856367688
+cycle= 1 E= -75.9971780762473  delta_E= 0.00206  |g|= 0.00116  |ddm|= 0.00415
+HOMO (A") = -0.501438087281347  LUMO (A') = 0.227138547533835
+PCM E_diel = -0.0164636911064153
+Solvent Energy = -0.0164636911064153
+cycle= 2 E= -75.9971785257375  delta_E= -4.49e-07  |g|= 0.000324  |ddm|= 0.00115
+HOMO (A") = -0.501287896850466  LUMO (A') = 0.227188298349795
+PCM E_diel = -0.0164636447762153
+Solvent Energy = -0.0164636447762153
+cycle= 3 E= -75.9971785611067  delta_E= -3.54e-08  |g|= 0.000145  |ddm|= 0.000359
+HOMO (A") = -0.501335587601831  LUMO (A') = 0.227179589505048
+PCM E_diel = -0.0164655825744402
+Solvent Energy = -0.0164655825744402
+cycle= 4 E= -75.9971785669524  delta_E= -5.85e-09  |g|= 3.2e-05  |ddm|= 0.000125
+HOMO (A") = -0.50132669616705  LUMO (A') = 0.227180323516639
+PCM E_diel = -0.0164662625643841
+Solvent Energy = -0.0164662625643841
+cycle= 5 E= -75.9971785675899  delta_E= -6.37e-10  |g|= 3.93e-06  |ddm|= 6.46e-05
+HOMO (A") = -0.501326162591639  LUMO (A') = 0.227180232532571
+PCM E_diel = -0.0164663158856667
+Solvent Energy = -0.0164663158856667
+Extra cycle  E= -75.9971785675989  delta_E= -9.01e-12  |g|= 1.67e-06  |ddm|= 5.8e-06
+converged SCF energy = -75.9971785675989
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 120 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000    -0.0016280695     0.0310904216
+1 H     0.0000000000    -0.0037838451    -0.0158373381
+2 H     0.0000000000     0.0053887877    -0.0145608540
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.547472188382 AA    0.000000000000  -1.412771719385  -1.034572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0165675685714655
+Solvent Energy = -0.0165675685714655
+init E= -75.9950631785021
+HOMO (A") = -0.501221489305915  LUMO (A') = 0.226727109275046
+PCM E_diel = -0.0165164071427646
+Solvent Energy = -0.0165164071427646
+cycle= 1 E= -75.997119496691  delta_E= -0.00206  |g|= 0.00101  |ddm|= 0.00379
+HOMO (A") = -0.501062594182916  LUMO (A') = 0.226823949828078
+PCM E_diel = -0.0165102033121392
+Solvent Energy = -0.0165102033121392
+cycle= 2 E= -75.9971198464298  delta_E= -3.5e-07  |g|= 0.000308  |ddm|= 0.00106
+HOMO (A") = -0.501209730599652  LUMO (A') = 0.226778403054383
+PCM E_diel = -0.0165089513857368
+Solvent Energy = -0.0165089513857368
+cycle= 3 E= -75.9971198805666  delta_E= -3.41e-08  |g|= 0.000138  |ddm|= 0.000359
+HOMO (A") = -0.501168801295873  LUMO (A') = 0.22678654624612
+PCM E_diel = -0.0165065468463531
+Solvent Energy = -0.0165065468463531
+cycle= 4 E= -75.9971198871335  delta_E= -6.57e-09  |g|= 3.92e-05  |ddm|= 0.000146
+HOMO (A") = -0.501180799226087  LUMO (A') = 0.226786198396519
+PCM E_diel = -0.0165054301443306
+Solvent Energy = -0.0165054301443306
+cycle= 5 E= -75.9971198881892  delta_E= -1.06e-09  |g|= 3.47e-06  |ddm|= 9.27e-05
+HOMO (A") = -0.501181181154281  LUMO (A') = 0.226786464203344
+PCM E_diel = -0.0165053675664088
+Solvent Energy = -0.0165053675664088
+cycle= 6 E= -75.9971198881967  delta_E= -7.5e-12  |g|= 6.66e-07  |ddm|= 7.42e-06
+HOMO (A") = -0.50118110875968  LUMO (A') = 0.226786492288453
+PCM E_diel = -0.0165053734681065
+Solvent Energy = -0.0165053734681065
+Extra cycle  E= -75.9971198881969  delta_E= -1.56e-13  |g|= 2.63e-07  |ddm|= 7.37e-07
+converged SCF energy = -75.9971198881969
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 120 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000     0.0012656437     0.0331905346
+1 H     0.0000000000    -0.0037220967    -0.0157373087
+2 H     0.0000000000     0.0024651578    -0.0167418112
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.542180416272 AA    0.000000000000  -1.412771719385  -1.024572496858 Bohr
+
+
+******** <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+method = PCMSymAdaptedRHF_Scanner
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpqeq9p6ae
+max_memory 4000 MB (current use 116 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A' A"
+Set gradient conv threshold to 3.16228e-05
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.0163707203134169
+Solvent Energy = -0.0163707203134169
+init E= -75.9993238188396
+HOMO (A") = -0.50122658487309  LUMO (A') = 0.227203326435397
+PCM E_diel = -0.016426271705378
+Solvent Energy = -0.016426271705378
+cycle= 1 E= -75.9972760667582  delta_E= 0.00205  |g|= 0.00107  |ddm|= 0.0044
+HOMO (A") = -0.501358130197434  LUMO (A') = 0.227104876476612
+PCM E_diel = -0.0164342357083975
+Solvent Energy = -0.0164342357083975
+cycle= 2 E= -75.9972765228739  delta_E= -4.56e-07  |g|= 0.000358  |ddm|= 0.00125
+HOMO (A") = -0.501207762028675  LUMO (A') = 0.227148238470061
+PCM E_diel = -0.0164371481149259
+Solvent Energy = -0.0164371481149259
+cycle= 3 E= -75.9972765844298  delta_E= -6.16e-08  |g|= 0.000152  |ddm|= 0.000528
+HOMO (A") = -0.501252036180208  LUMO (A') = 0.227137498735482
+PCM E_diel = -0.0164399761407716
+Solvent Energy = -0.0164399761407716
+cycle= 4 E= -75.9972765934676  delta_E= -9.04e-09  |g|= 4.72e-05  |ddm|= 0.000189
+HOMO (A") = -0.501237776209382  LUMO (A') = 0.227137214971645
+PCM E_diel = -0.016441182000429
+Solvent Energy = -0.016441182000429
+cycle= 5 E= -75.9972765949175  delta_E= -1.45e-09  |g|= 3.75e-06  |ddm|= 0.000113
+HOMO (A") = -0.501237513629132  LUMO (A') = 0.227136961057565
+PCM E_diel = -0.0164412284650092
+Solvent Energy = -0.0164412284650092
+cycle= 6 E= -75.9972765949256  delta_E= -8.07e-12  |g|= 7.7e-07  |ddm|= 6.97e-06
+HOMO (A") = -0.501237568379885  LUMO (A') = 0.227136942991063
+PCM E_diel = -0.0164412235559629
+Solvent Energy = -0.0164412235559629
+Extra cycle  E= -75.9972765949259  delta_E= -3.41e-13  |g|= 3.03e-07  |ddm|= 9.63e-07
+converged SCF energy = -75.9972765949259
+
+
+******** <class 'pyscf.grad.rhf.PCMGradients_Scanner'> for <class 'pyscf.scf.hf.PCMSymAdaptedRHF_Scanner'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 120 MB)
+--------------- PCMSymAdaptedRHF_Scanner (+PCM) gradients ---------------
+         x                y                z
+0 O    -0.0000000000    -0.0012821869     0.0308541584
+1 H     0.0000000000    -0.0033913443    -0.0156057456
+2 H     0.0000000000     0.0046648664    -0.0145953137
+----------------------------------------------
+New geometry
+   1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr
+   2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr
+   3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr
+Frequencies [cm^-1]:
+0: -387.0816
+1: -136.2818
+2: -131.7755
+3: -129.0643
+4: 154.7170
+5: 560.7348
+6: 1786.0454
+7: 3782.8828
+8: 3836.0033
+Mode                                 0                   1                   2
+Irrep
+Freq [cm^-1]                     -387.0816           -136.2818           -131.7755
+Reduced mass [au]                   1.0080              4.6424              3.1706
+Force const [Dyne/A]               -0.0890             -0.0508             -0.0324
+Char temp [K]                    -556.9242           -196.0792           -189.5957
+Normal mode                   x     y     z       x     y     z       x     y     z
+       0   O                -0.00  0.00 -0.00   -0.23  0.00  0.00   -0.00 -0.21 -0.03
+       1   H                 0.70  0.00 -0.00   -0.29  0.00  0.00   -0.00 -0.33 -0.19
+       2   H                -0.70  0.00 -0.00   -0.29  0.00  0.00   -0.00 -0.33  0.12
+Mode                                 3                   4                   5
+Irrep
+Freq [cm^-1]                     -129.0643            154.7170            560.7348
+Reduced mass [au]                   5.6509              1.2425              1.1917
+Force const [Dyne/A]               -0.0555              0.0175              0.2208
+Char temp [K]                    -185.6948            222.6033            806.7725
+Normal mode                   x     y     z       x     y     z       x     y     z
+       0   O                -0.00  0.03 -0.23    0.00 -0.11 -0.00   -0.10  0.00  0.00
+       1   H                -0.00  0.04 -0.22    0.00  0.32  0.54    0.64  0.00  0.00
+       2   H                -0.00  0.05 -0.26   -0.00  0.32 -0.54    0.64  0.00  0.00
+Mode                                 6                   7                   8
+Irrep
+Freq [cm^-1]                     1786.0454           3782.8828           3836.0033
+Reduced mass [au]                   1.0944              1.0435              1.0822
+Force const [Dyne/A]                2.0569              8.7979              9.3827
+Char temp [K]                    2569.7217           5442.7261           5519.1547
+Normal mode                   x     y     z       x     y     z       x     y     z
+       0   O                 0.00  0.00  0.07   -0.00 -0.00 -0.05   -0.00  0.07 -0.00
+       1   H                 0.00 -0.40 -0.54   -0.00 -0.58  0.38   -0.00 -0.53  0.42
+       2   H                -0.00  0.40 -0.54    0.00  0.58  0.38    0.00 -0.53 -0.42

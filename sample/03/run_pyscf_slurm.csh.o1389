@@ -1,0 +1,12 @@
+----- Python execution script -----
+Host: nakailab63-gpu
+OS: Linux at Fri Mar 13 12:53:48 JST 2026
+Directory: /home/hashimoto/work/HSM/sample/03
+Python script: sample03.py
+Conda environment: py310_pyscf2110
+Cores: 8
+Partition: gpu
+mkdir: created directory '/work/hashimoto/python_job.1389'
+Running python script sample03.py
+Python script was finished. Output was saved in sample03.out
+Job was completed successfully at Fri Mar 13 12:53:52 JST 2026

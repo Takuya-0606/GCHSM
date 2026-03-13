@@ -1,0 +1,387 @@
+#INFO: **** input file is /work/hashimoto/python_job.1361/sample01.py ****
+#!/usr/bin/env python
+import numpy as np
+from pyscf import gto, scf
+from pyscf.solvent import hsm
+
+# =========================
+# User settings
+# =========================
+atom = '''
+Na   0.00000000000000   0.00000000000000   0.00000000000000
+Cl   2.50000000000000   0.00000000000000   0.00000000000000
+'''
+basis = 'sto-3g'
+charge = 0
+spin = 0
+unit = 'angstrom'
+
+pcm_method = 'C-PCM'
+eps = 80.1510
+vdw_scale = 1.2
+lebedev_order = 17
+
+# finite-difference step in Bohr
+h = 5.0e-3
+
+# =========================
+# Build reference molecule
+# =========================
+mol0 = gto.M(
+    atom=atom,
+    basis=basis,
+    charge=charge,
+    spin=spin,
+    unit=unit,
+    verbose=4,
+)
+
+# Reference cavity coordinates for HSM (fixed cavity)
+cavity_coords_ref = mol0.atom_coords(unit='B').copy()
+
+
+def make_pcm(mol, cavity_coords_fixed):
+    """Create HSM PCM object with fixed cavity coordinates."""
+    pcm_obj = hsm.PCM(mol)
+    pcm_obj.cavity_coords = cavity_coords_fixed.copy()
+    pcm_obj.method = pcm_method
+    pcm_obj.eps = eps
+    pcm_obj.vdw_scale = vdw_scale
+    pcm_obj.lebedev_order = lebedev_order
+    return pcm_obj
+
+
+def run_scf_energy(mol, cavity_coords_fixed, dm0=None, verbose=0):
+    """Run RHF+HSM single-point energy."""
+    pcm_obj = make_pcm(mol, cavity_coords_fixed)
+    mf = scf.RHF(mol).PCM(pcm_obj)
+    mf.verbose = verbose
+    mf.conv_tol = 1e-12
+    mf.conv_tol_grad = 1e-10
+
+    e = mf.kernel(dm0=dm0)
+    if not mf.converged:
+        raise RuntimeError("SCF did not converge.")
+    return e, mf
+
+
+# =========================
+# Analytical gradient
+# =========================
+pcm0 = make_pcm(mol0, cavity_coords_ref)
+mf0 = scf.RHF(mol0).PCM(pcm0)
+mf0.conv_tol = 1e-12
+mf0.conv_tol_grad = 1e-10
+e0 = mf0.kernel()
+
+if not mf0.converged:
+    raise RuntimeError("Reference SCF did not converge.")
+
+g_anal = mf0.nuc_grad_method().kernel()   # shape = (natm, 3), Hartree/Bohr
+
+print("\n=== Analytical gradient (Hartree/Bohr) ===")
+print(g_anal)
+
+# =========================
+# Numerical gradient by central difference
+# =========================
+coords0 = mol0.atom_coords(unit='B').copy()
+symbols = [mol0.atom_symbol(i) for i in range(mol0.natm)]
+g_num = np.zeros_like(coords0)
+
+# use reference density as initial guess for nearby points
+dm_ref = mf0.make_rdm1()
+
+for ia in range(mol0.natm):
+    for xyz in range(3):
+        coords_p = coords0.copy()
+        coords_m = coords0.copy()
+        coords_p[ia, xyz] += h
+        coords_m[ia, xyz] -= h
+
+        mol_p = gto.M(
+            atom=[(symbols[i], coords_p[i]) for i in range(mol0.natm)],
+            basis=basis,
+            charge=charge,
+            spin=spin,
+            unit='Bohr',
+            verbose=0,
+        )
+        mol_m = gto.M(
+            atom=[(symbols[i], coords_m[i]) for i in range(mol0.natm)],
+            basis=basis,
+            charge=charge,
+            spin=spin,
+            unit='Bohr',
+            verbose=0,
+        )
+
+        ep, _ = run_scf_energy(mol_p, cavity_coords_ref, dm0=dm_ref, verbose=0)
+        em, _ = run_scf_energy(mol_m, cavity_coords_ref, dm0=dm_ref, verbose=0)
+
+        g_num[ia, xyz] = (ep - em) / (2.0 * h)
+
+print("\n=== Numerical gradient by central difference (Hartree/Bohr) ===")
+print(g_num)
+
+# =========================
+# Comparison
+# =========================
+diff = g_anal - g_num
+
+print("\n=== Difference: analytical - numerical (Hartree/Bohr) ===")
+print(diff)
+
+print("\n=== Summary ===")
+print(f"Max abs diff   : {np.max(np.abs(diff)):.12e}")
+print(f"RMS diff       : {np.sqrt(np.mean(diff**2)):.12e}")
+print(f"Analytical norm: {np.linalg.norm(g_anal):.12e}")
+print(f"Numerical norm : {np.linalg.norm(g_num):.12e}")
+
+print("\n=== Per-component comparison ===")
+for ia in range(mol0.natm):
+    for xyz, lab in enumerate("xyz"):
+        print(
+            f"Atom {ia:2d} ({symbols[ia]:>2s}) {lab}: "
+            f"anal = {g_anal[ia, xyz]: .12e}   "
+            f"num = {g_num[ia, xyz]: .12e}   "
+            f"diff = {diff[ia, xyz]: .12e}"
+        )
+
+from pyscf.solvent.grad.hsm import grad_qv, grad_nuc, grad_solver
+
+dm = mf0.make_rdm1()
+g_qv = grad_qv(mf0.with_solvent, dm)
+g_nuc = grad_nuc(mf0.with_solvent, dm)
+g_sol = grad_solver(mf0.with_solvent, dm)
+
+print("grad_qv =\n", g_qv)
+print("grad_nuc =\n", g_nuc)
+print("grad_solver =\n", g_sol)
+print("grad_solvent_total =\n", g_qv + g_nuc + g_sol)
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='nakailab63-gpu', release='6.14.0-28-generic', version='#28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 25 10:47:01 UTC 2', machine='x86_64')  Threads 4
+Python 3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:16:04) [GCC 11.2.0]
+numpy 1.26.4  scipy 1.17.0  h5py 3.15.1
+Date: Thu Mar 12 12:16:26 2026
+PySCF version 2.12.1
+PySCF path  /home/hashimoto/miniconda3/envs/hsm/lib/python3.12/site-packages/pyscf
+
+[ENV] PYSCF_EXT_PATH /home/hashimoto/miniconda3/envs/cpcm-gcm/lib/python3.10/site-packages/pyscf
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 2
+[INPUT] num. electrons = 28
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 0
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = angstrom
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 Na     0.000000000000   0.000000000000   0.000000000000 AA    0.000000000000   0.000000000000   0.000000000000 Bohr   0.0
+[INPUT]  2 Cl     2.500000000000   0.000000000000   0.000000000000 AA    4.724315311413   0.000000000000   0.000000000000 Bohr   0.0
+
+nuclear repulsion = 39.582455376816
+number of shells = 10
+number of NR pGTOs = 54
+number of NR cGTOs = 18
+basis = sto-3g
+ecp = {}
+CPU time:         1.04
+
+
+******** <class 'pyscf.solvent._attach_solvent.PCMRHF'> ********
+method = PCMRHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-12
+SCF conv_tol_grad = 1e-10
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpa9i2mlc4
+max_memory 4000 MB (current use 101 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Initial guess from minao.
+Surface area [Bohr**2] = 409.169163537
+PCM E_diel = -0.0429775837689645
+Solvent Energy = -0.0429775837689645
+init E= -613.761605517664
+  HOMO = -0.423387901769056  LUMO = 0.355845400484482
+PCM E_diel = -0.0467949005947718
+Solvent Energy = -0.0467949005947718
+cycle= 1 E= -614.547061307309  delta_E= -0.785  |g|= 0.139  |ddm|= 1.05
+  HOMO = -0.231007733455726  LUMO = 0.3833145917567
+PCM E_diel = -0.0433692067861363
+Solvent Energy = -0.0433692067861363
+cycle= 2 E= -614.554265510306  delta_E= -0.0072  |g|= 0.0337  |ddm|= 0.229
+  HOMO = -0.240104993818822  LUMO = 0.396067896321268
+PCM E_diel = -0.04265991872657
+Solvent Energy = -0.04265991872657
+cycle= 3 E= -614.554647982105  delta_E= -0.000382  |g|= 0.00733  |ddm|= 0.0436
+  HOMO = -0.243912807103263  LUMO = 0.396889813542941
+PCM E_diel = -0.0422965722287283
+Solvent Energy = -0.0422965722287283
+cycle= 4 E= -614.554683305934  delta_E= -3.53e-05  |g|= 0.000649  |ddm|= 0.0206
+  HOMO = -0.244132275794706  LUMO = 0.396905290042121
+PCM E_diel = -0.0422801872234701
+Solvent Energy = -0.0422801872234701
+cycle= 5 E= -614.55468360359  delta_E= -2.98e-07  |g|= 5.24e-05  |ddm|= 0.00182
+  HOMO = -0.244129037289  LUMO = 0.396899980210197
+PCM E_diel = -0.0422781643350434
+Solvent Energy = -0.0422781643350434
+cycle= 6 E= -614.554683605943  delta_E= -2.35e-09  |g|= 4.6e-06  |ddm|= 0.00018
+  HOMO = -0.244130763498305  LUMO = 0.396900308128821
+PCM E_diel = -0.0422780934049656
+Solvent Energy = -0.0422780934049656
+cycle= 7 E= -614.554683605955  delta_E= -1.25e-11  |g|= 4.77e-07  |ddm|= 1.13e-05
+  HOMO = -0.244130681567053  LUMO = 0.39690031507665
+PCM E_diel = -0.0422780764735558
+Solvent Energy = -0.0422780764735558
+cycle= 8 E= -614.554683605955  delta_E= 2.27e-13  |g|= 4.7e-08  |ddm|= 1.03e-06
+  HOMO = -0.244130703109588  LUMO = 0.39690031852101
+PCM E_diel = -0.0422780784004683
+Solvent Energy = -0.0422780784004683
+cycle= 9 E= -614.554683605955  delta_E=    0  |g|= 3.72e-09  |ddm|= 1.12e-07
+  HOMO = -0.244130702173771  LUMO = 0.396900318294959
+PCM E_diel = -0.0422780783765675
+Solvent Energy = -0.0422780783765675
+cycle= 10 E= -614.554683605955  delta_E= 2.27e-13  |g|= 2.06e-09  |ddm|= 2.59e-09
+  HOMO = -0.244130702010828  LUMO = 0.396900318318556
+PCM E_diel = -0.0422780783912555
+Solvent Energy = -0.0422780783912555
+cycle= 11 E= -614.554683605955  delta_E= -5.68e-13  |g|= 1.73e-09  |ddm|= 1e-09
+  HOMO = -0.244130702520823  LUMO = 0.396900318434958
+PCM E_diel = -0.0422780783456581
+Solvent Energy = -0.0422780783456581
+cycle= 12 E= -614.554683605955  delta_E= -1.14e-13  |g|= 1.86e-09  |ddm|= 2.6e-09
+  HOMO = -0.244130702347508  LUMO = 0.396900318569144
+PCM E_diel = -0.0422780783659064
+Solvent Energy = -0.0422780783659064
+cycle= 13 E= -614.554683605955  delta_E= 2.27e-13  |g|= 1.87e-09  |ddm|= 1.53e-09
+  HOMO = -0.244130702625364  LUMO = 0.39690031864608
+PCM E_diel = -0.0422780783349184
+Solvent Energy = -0.0422780783349184
+cycle= 14 E= -614.554683605955  delta_E= 5.68e-13  |g|= 2.06e-09  |ddm|= 2.79e-09
+  HOMO = -0.244130702489983  LUMO = 0.396900318655777
+PCM E_diel = -0.0422780783535946
+Solvent Energy = -0.0422780783535946
+cycle= 15 E= -614.554683605955  delta_E=    0  |g|= 1.94e-09  |ddm|= 1.89e-09
+  HOMO = -0.244130702488032  LUMO = 0.396900318634663
+PCM E_diel = -0.0422780783533026
+Solvent Energy = -0.0422780783533026
+cycle= 16 E= -614.554683605955  delta_E= -1.14e-13  |g|= 1.72e-09  |ddm|= 4e-10
+  HOMO = -0.244130701841736  LUMO = 0.396900318099798
+PCM E_diel = -0.0422780784050293
+Solvent Energy = -0.0422780784050293
+cycle= 17 E= -614.554683605955  delta_E= -1.14e-13  |g|= 4.64e-10  |ddm|= 3.12e-09
+  HOMO = -0.244130701841933  LUMO = 0.396900318119033
+PCM E_diel = -0.0422780784054611
+Solvent Energy = -0.0422780784054611
+cycle= 18 E= -614.554683605955  delta_E= -3.41e-13  |g|= 3.85e-10  |ddm|= 1.42e-10
+  HOMO = -0.244130701832369  LUMO = 0.39690031812135
+PCM E_diel = -0.042278078406422
+Solvent Energy = -0.042278078406422
+cycle= 19 E= -614.554683605955  delta_E= 2.27e-13  |g|= 3.41e-10  |ddm|= 9.85e-11
+  HOMO = -0.244130701827877  LUMO = 0.396900318126914
+PCM E_diel = -0.0422780784069881
+Solvent Energy = -0.0422780784069881
+cycle= 20 E= -614.554683605955  delta_E= -3.41e-13  |g|= 3.1e-10  |ddm|= 7.43e-11
+  HOMO = -0.244130701806708  LUMO = 0.396900318121645
+PCM E_diel = -0.0422780784089091
+Solvent Energy = -0.0422780784089091
+cycle= 21 E= -614.554683605955  delta_E= 1.14e-13  |g|= 2.64e-10  |ddm|= 1.28e-10
+  HOMO = -0.244130701792971  LUMO = 0.396900318122705
+PCM E_diel = -0.0422780784102159
+Solvent Energy = -0.0422780784102159
+cycle= 22 E= -614.554683605955  delta_E= 2.27e-13  |g|= 2.26e-10  |ddm|= 9.52e-11
+  HOMO = -0.244130701767128  LUMO = 0.396900318123298
+PCM E_diel = -0.0422780784128871
+Solvent Energy = -0.0422780784128871
+cycle= 23 E= -614.554683605954  delta_E= 5.68e-13  |g|= 1.72e-10  |ddm|= 1.84e-10
+  HOMO = -0.244130701746079  LUMO = 0.396900318124287
+PCM E_diel = -0.0422780784149462
+Solvent Energy = -0.0422780784149462
+cycle= 24 E= -614.554683605955  delta_E= -7.96e-13  |g|= 1.22e-10  |ddm|= 1.36e-10
+  HOMO = -0.244130701724112  LUMO = 0.396900318124142
+PCM E_diel = -0.0422780784170843
+Solvent Energy = -0.0422780784170843
+cycle= 25 E= -614.554683605955  delta_E= 3.41e-13  |g|= 8.02e-11  |ddm|= 1.38e-10
+  HOMO = -0.244130701700288  LUMO = 0.3969003181133
+PCM E_diel = -0.0422780784192007
+Solvent Energy = -0.0422780784192007
+Extra cycle  E= -614.554683605955  delta_E= 1.14e-13  |g|= 2.21e-11  |ddm|= 1.55e-10
+converged SCF energy = -614.554683605955
+
+
+******** <class 'pyscf.solvent.grad.pcm.PCMGradients'> for <class 'pyscf.solvent._attach_solvent.PCMRHF'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 112 MB)
+--------------- PCMRHF (+PCM) gradients ---------------
+         x                y                z
+0 Na    -0.0280114242     0.0000000000     0.0000000000
+1 Cl     0.0260657368    -0.0000000000    -0.0000000000
+----------------------------------------------
+
+=== Analytical gradient (Hartree/Bohr) ===
+[[-2.80114242e-02  9.73796364e-17  1.08659632e-17]
+ [ 2.60657368e-02 -9.90550675e-17 -9.63353022e-18]]
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+Surface area [Bohr**2] = 409.169163537
+
+=== Numerical gradient by central difference (Hartree/Bohr) ===
+[[-2.80108896e-02 -3.41060513e-11  4.54747351e-11]
+ [ 2.60651856e-02 -2.27373675e-11  0.00000000e+00]]
+
+=== Difference: analytical - numerical (Hartree/Bohr) ===
+[[-5.34550456e-07  3.41061487e-11 -4.54747242e-11]
+ [ 5.51187157e-07  2.27372685e-11 -9.63353022e-18]]
+
+=== Summary ===
+Max abs diff   : 5.511871567498e-07
+RMS diff       : 3.134622453673e-07
+Analytical norm: 3.826306990972e-02
+Numerical norm : 3.826230309675e-02
+
+=== Per-component comparison ===
+Atom  0 (Na) x: anal = -2.801142418952e-02   num = -2.801088963906e-02   diff = -5.345504560939e-07
+Atom  0 (Na) y: anal =  9.737963637617e-17   num = -3.410605131648e-11   diff =  3.410614869612e-11
+Atom  0 (Na) z: anal =  1.086596316184e-17   num =  4.547473508865e-11   diff = -4.547472422268e-11
+Atom  1 (Cl) x: anal =  2.606573677821e-02   num =  2.606518559105e-02   diff =  5.511871567498e-07
+Atom  1 (Cl) y: anal = -9.905506754583e-17   num = -2.273736754432e-11   diff =  2.273726848926e-11
+Atom  1 (Cl) z: anal = -9.633530223591e-18   num =  0.000000000000e+00   diff = -9.633530223591e-18
+grad_qv =
+ [[-1.69217865e-01 -3.00357883e-18  1.46282590e-18]
+ [-3.28179578e-01 -4.58617519e-17 -3.57786717e-17]]
+grad_nuc =
+ [[ 1.80935591e-01  3.87602277e-18 -2.23616698e-18]
+ [ 3.14516165e-01  4.33138768e-17  3.77844457e-17]]
+grad_solver =
+ [[0. 0. 0.]
+ [0. 0. 0.]]
+grad_solvent_total =
+ [[ 1.17177258e-02  8.72443936e-19 -7.73341081e-19]
+ [-1.36634132e-02 -2.54787511e-18  2.00577402e-18]]

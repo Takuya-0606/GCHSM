@@ -1,0 +1,227 @@
+#INFO: **** input file is /work/hashimoto/python_job.1396/sample05.py ****
+#!/usr/bin/env python
+from pyscf import gto, scf, dft, cc, solvent, mp
+from pyscf.hessian import thermo
+from pyscf.solvent import pcm, hsm
+import numpy
+import numpy as np
+mol = gto.M(
+    atom = '''
+  O           0.00000000000000      0.00000000000000      0.06865240486852
+  H           0.00000000000000      0.74760659813079     -0.54482630232708
+  H           0.00000000000000     -0.74760659813079     -0.54482630232708
+''',
+    basis   = '6-31g',
+    spin = 0,
+    symmetry=True,
+    unit    = 'angstrom',
+    verbose = 4,
+)
+
+pcm_obj = hsm.PCM(mol)
+pcm_obj.cavity_coords = mol.atom_coords(unit='B')
+pcm_obj.method        = 'C-PCM'
+pcm_obj.eps           = 80.1510
+pcm_obj.vdw_scale     = 1.2
+pcm_obj.lebedev_order = 17
+
+# Calculation level
+# Hartree-Fock
+mymp = scf.RHF(mol).PCM(pcm_obj)
+mymp.kernel()
+# DFT
+#mymp = dft.RKS(mol,xc='b3lypg').PCM(pcm_obj)
+#mymp = dft.RKS(mol,xc='b3lypg')
+#mymp.kernel()
+# MP2
+#mf = scf.RHF(mol)
+#mf.kernel()
+#mymp = mp.MP2(mf).PCM(pcm_obj)
+#mymp.kernel()
+
+# Analytical hessian
+g = mymp.nuc_grad_method()
+g.kernel()
+
+from pyscf.solvent.hessian import hsm as hsm_hess
+h = hsm_hess.make_hess_object(mymp)
+hessian = h.kernel()
+
+    # thermodynamics
+results = thermo.harmonic_analysis(
+        mol, hessian,
+        exclude_trans=False, 
+        exclude_rot=False,  
+        imaginary_freq=False,
+    )
+
+freqs = results['freq_wavenumber'].real
+norm_mode = results['norm_mode']
+
+natm = mol.natm
+print("Frequencies [cm^-1]:")
+for i, w in enumerate(freqs):
+    print(f"{i}: {w:.4f}")
+
+thermo.dump_normal_mode(mol, results)
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='nakailab63-gpu', release='6.14.0-28-generic', version='#28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 25 10:47:01 UTC 2', machine='x86_64')  Threads 4
+Python 3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:16:04) [GCC 11.2.0]
+numpy 1.26.4  scipy 1.17.0  h5py 3.15.1
+Date: Fri Mar 13 14:17:04 2026
+PySCF version 2.12.1
+PySCF path  /home/hashimoto/miniconda3/envs/hsm/lib/python3.12/site-packages/pyscf
+
+[ENV] PYSCF_EXT_PATH /home/hashimoto/miniconda3/envs/cpcm-gcm/lib/python3.10/site-packages/pyscf
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 3
+[INPUT] num. electrons = 10
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 0
+[INPUT] symmetry True subgroup None
+[INPUT] Mole.unit = angstrom
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr   0.0
+[INPUT]  2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr   0.0
+[INPUT]  3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr   0.0
+
+nuclear repulsion = 9.1088347312386
+point group symmetry = C2v
+symmetry origin: [ 0.         0.        -0.1021271]
+symmetry axis x: [-1. -0. -0.]
+symmetry axis y: [0. 1. 0.]
+symmetry axis z: [0. 0. 1.]
+num. orbitals of irrep A1 = 7
+num. orbitals of irrep B1 = 2
+num. orbitals of irrep B2 = 4
+number of shells = 9
+number of NR pGTOs = 30
+number of NR cGTOs = 13
+basis = 6-31g
+ecp = {}
+CPU time:         0.97
+
+
+******** <class 'pyscf.solvent._attach_solvent.PCMSymAdaptedRHF'> ********
+method = PCMSymAdaptedRHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpyfdteswj
+max_memory 4000 MB (current use 104 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Freeze 0 electrons in irreps []
+    10 free electrons in irreps A1 B1 B2
+Set gradient conv threshold to 3.16228e-05
+Initial guess from minao.
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.000161348280512903
+Solvent Energy = -0.000161348280512903
+init E= -75.8180983389973
+HOMO (B1) = -0.464056843758632  LUMO (A1) = 0.130367653788656
+PCM E_diel = -0.0219603649547363
+Solvent Energy = -0.0219603649547363
+cycle= 1 E= -75.9645924346435  delta_E= -0.146  |g|= 0.398  |ddm|= 1.18
+HOMO (B1) = -0.424546686827092  LUMO (A1) = 0.237531247434537
+PCM E_diel = -0.0155491672611298
+Solvent Energy = -0.0155491672611298
+cycle= 2 E= -75.9892309676917  delta_E= -0.0246  |g|= 0.21  |ddm|= 0.362
+HOMO (B1) = -0.505594044799926  LUMO (A1) = 0.223122125713838
+PCM E_diel = -0.0168419524194813
+Solvent Energy = -0.0168419524194813
+cycle= 3 E= -75.9970533900652  delta_E= -0.00782  |g|= 0.0208  |ddm|= 0.131
+HOMO (B1) = -0.500338614011024  LUMO (A1) = 0.227203027099821
+PCM E_diel = -0.0164963197026397
+Solvent Energy = -0.0164963197026397
+cycle= 4 E= -75.997195138879  delta_E= -0.000142  |g|= 0.00303  |ddm|= 0.0199
+HOMO (B1) = -0.501079996657217  LUMO (A1) = 0.227014185349748
+PCM E_diel = -0.0164755246765612
+Solvent Energy = -0.0164755246765612
+cycle= 5 E= -75.9972006191921  delta_E= -5.48e-06  |g|= 0.000667  |ddm|= 0.00512
+HOMO (B1) = -0.50123090578824  LUMO (A1) = 0.226961953447149
+PCM E_diel = -0.0164715020369093
+Solvent Energy = -0.0164715020369093
+cycle= 6 E= -75.9972009204816  delta_E= -3.01e-07  |g|= 8.39e-05  |ddm|= 0.00142
+HOMO (B1) = -0.501214428646338  LUMO (A1) = 0.226962394898982
+PCM E_diel = -0.0164727184127004
+Solvent Energy = -0.0164727184127004
+cycle= 7 E= -75.9972009245483  delta_E= -4.07e-09  |g|= 1.34e-05  |ddm|= 0.000145
+HOMO (B1) = -0.501209562102315  LUMO (A1) = 0.226962731097657
+PCM E_diel = -0.016473130493955
+Solvent Energy = -0.016473130493955
+cycle= 8 E= -75.9972009246769  delta_E= -1.29e-10  |g|= 1.48e-06  |ddm|= 3.08e-05
+HOMO (B1) = -0.501209678419513  LUMO (A1) = 0.22696254204492
+PCM E_diel = -0.0164731805200685
+Solvent Energy = -0.0164731805200685
+Extra cycle  E= -75.9972009246781  delta_E= -1.25e-12  |g|= 6.63e-07  |ddm|= 2.5e-06
+converged SCF energy = -75.9972009246781
+
+
+******** <class 'pyscf.solvent.grad.pcm.PCMGradients'> for <class 'pyscf.solvent._attach_solvent.PCMSymAdaptedRHF'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 115 MB)
+--------------- PCMSymAdaptedRHF (+PCM) gradients ---------------
+         x                y                z
+0 O     0.0000000000     0.0000000000     0.0320254431
+1 H     0.0000000000    -0.0035573133    -0.0156716564
+2 H    -0.0000000000     0.0035573133    -0.0156716564
+----------------------------------------------
+Frequencies [cm^-1]:
+0: -396.5055
+1: -136.1458
+2: -131.3142
+3: -128.1860
+4: 153.6877
+5: 551.4729
+6: 1785.9101
+7: 3782.7377
+8: 3835.8089
+Mode                                 0                   1                   2
+Irrep
+Freq [cm^-1]                     -396.5055           -136.1458           -131.3142
+Reduced mass [au]                   1.0080              4.6035              3.1430
+Force const [Dyne/A]               -0.0934             -0.0503             -0.0319
+Char temp [K]                    -570.4831           -195.8835           -188.9318
+Normal mode                   x     y     z       x     y     z       x     y     z
+       0   O                 0.00  0.00  0.00   -0.23 -0.00 -0.00    0.00 -0.21  0.00
+       1   H                 0.70  0.00  0.00   -0.29 -0.00 -0.00    0.00 -0.34 -0.15
+       2   H                -0.70  0.00 -0.00   -0.29 -0.00 -0.00   -0.00 -0.34  0.15
+Mode                                 3                   4                   5
+Irrep
+Freq [cm^-1]                     -128.1860            153.6877            551.4729
+Reduced mass [au]                   5.7285              1.2431              1.1943
+Force const [Dyne/A]               -0.0555              0.0173              0.2140
+Char temp [K]                    -184.4311            221.1223            793.4467
+Normal mode                   x     y     z       x     y     z       x     y     z
+       0   O                -0.00  0.00  0.23   -0.00 -0.11  0.00   -0.10  0.00 -0.00
+       1   H                -0.00  0.01  0.24   -0.00  0.32  0.54    0.64 -0.00 -0.00
+       2   H                -0.00 -0.01  0.24    0.00  0.32 -0.54    0.64 -0.00  0.00
+Mode                                 6                   7                   8
+Irrep
+Freq [cm^-1]                     1785.9101           3782.7377           3835.8089
+Reduced mass [au]                   1.0944              1.0435              1.0822
+Force const [Dyne/A]                2.0566              8.7971              9.3818
+Char temp [K]                    2569.5270           5442.5174           5518.8750
+Normal mode                   x     y     z       x     y     z       x     y     z
+       0   O                -0.00  0.00 -0.07    0.00  0.00  0.05   -0.00 -0.07  0.00
+       1   H                -0.00  0.40  0.54    0.00  0.58 -0.38    0.00  0.53 -0.42
+       2   H                 0.00 -0.40  0.54   -0.00 -0.58 -0.38    0.00  0.53  0.42

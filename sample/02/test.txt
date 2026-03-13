@@ -1,0 +1,74 @@
+pyscf.__file__ = /home/hashimoto/miniconda3/envs/hsm/lib/python3.12/site-packages/pyscf/__init__.py
+hsm_mod.__file__ = /home/hashimoto/miniconda3/envs/hsm/lib/python3.12/site-packages/pyscf/solvent/hsm.py
+hsm_hess_mod.__file__ = /home/hashimoto/miniconda3/envs/hsm/lib/python3.12/site-packages/pyscf/solvent/hessian/hsm.py
+
+[get_dqsym_dx]
+def get_dqsym_dx(pcmobj, dm, atmlst):
+    # Fixed-cavity HSM: only the response at fixed K and R remains.
+    return get_dqsym_dx_fix_K_R(pcmobj, dm, atmlst)
+
+
+[analytical_hess_solver]
+def analytical_hess_solver(pcmobj, dm, verbose=None):
+    # Fixed-cavity HSM: the cavity-response / solver contribution vanishes.
+    return numpy.zeros((pcmobj.mol.natm, pcmobj.mol.natm, 3, 3))
+
+
+[int3c2e_ip2 in analytical_grad_vmat?]  False
+def analytical_grad_vmat(pcmobj, dm, atmlst=None, verbose=None):
+    """dv_solv / da for fixed-cavity HSM."""
+    _sync_cavity_coords(pcmobj)
+    if not pcmobj._intermediates:
+        pcmobj.build()
+    dm_cache = pcmobj._intermediates.get('dm', None)
+    if dm_cache is None or numpy.linalg.norm(dm_cache - dm) >= 1e-10:
+        pcmobj._get_vind(dm)
+    mol = pcmobj.mol
+    nao = mol.nao
+    log = logger.new_logger(mol, mol.verbose)
+    t1 = (logger.process_clock(), logger.perf_counter())
+
+    if atmlst is None:
+        atmlst = range(mol.natm)
+    atmlst = list(atmlst)
+
+    charge_exp = pcmobj.surface['charge_exp']
+    grid_coords = pcmobj.surface['grid_coords']
+    q_sym = pcmobj._intermediates['q_sym']
+    ngrids = q_sym.shape[0]
+
+    aoslice = numpy.array(mol.aoslice_by_atom())
+    dIdx = numpy.zeros((len(atmlst), 3, nao, nao))
+
+    max_memory = pcmobj.max_memory - lib.current_memory()[0]
+    blksize = int(max(max_memory * .9e6 / 8 / nao**2 / 3, 400))
+    int3c2e_ip1 = mol._add_suffix('int3c2e_ip1')
+    cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, int3c2e_ip1)
+    dIdA = numpy.zeros((3, nao, nao))
+    for g0, g1 in lib.prange(0, ngrids, blksize):
+        fakemol = gto.fakemol_for_charges(grid_coords[g0:g1], expnt=charge_exp[g0:g1]**2)
+        v_nj = df.incore.aux_e2(mol, fakemol, intor=int3c2e_ip1, aosym='s1', cintopt=cintopt)
+        dIdA += numpy.einsum('dijq,q->dij', v_nj, q_sym[g0:g1])
+
+    for ia, i_atom in enumerate(atmlst):
+        p0, p1 = aoslice[i_atom, 2:]
+        dIdx[ia, :, p0:p1, :] += dIdA[:, p0:p1, :]
+        dIdx[ia, :, :, p0:p1] += dIdA[:, p0:p1, :].transpose(0, 2, 1)
+
+    dV_on_molecule_dx = dIdx
+
+    int3c2e = mol._add_suffix('int3c2e')
+    cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, int3c2e)
+    dqdx = get_dqsym_dx(pcmobj, dm, atmlst)
+    for ia, _i_atom in enumerate(atmlst):
+        for i_xyz in range(3):
+            dIdx_from_dqdx = numpy.zeros((nao, nao))
+            for g0, g1 in lib.prange(0, ngrids, blksize):
+                fakemol = gto.fakemol_for_charges(grid_coords[g0:g1], expnt=charge_exp[g0:g1]**2)
+                v_nj = df.incore.aux_e2(mol, fakemol, intor=int3c2e, aosym='s1', cintopt=cintopt)
+                dIdx_from_dqdx += numpy.einsum('ijq,q->ij', v_nj, dqdx[ia, i_xyz, g0:g1])
+            dV_on_molecule_dx[ia, i_xyz, :, :] += dIdx_from_dqdx
+
+    log.timer_debug1('computing solvent grad veff', *t1)
+    return dV_on_molecule_dx
+

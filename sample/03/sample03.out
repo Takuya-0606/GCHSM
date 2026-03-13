@@ -1,0 +1,514 @@
+#INFO: **** input file is /work/hashimoto/python_job.1390/sample03.py ****
+#!/usr/bin/env python
+import numpy as np
+from pyscf import gto, scf
+from pyscf.solvent import hsm
+from pyscf.solvent.hessian import hsm as hsm_hess
+
+
+# ============================================================
+# User settings
+# ============================================================
+ATOM = '''
+O   0.00000000000000   0.00000000000000   0.06865240486852
+H   0.00000000000000   0.74760659813079  -0.54482630232708
+H   0.00000000000000  -0.74760659813079  -0.54482630232708
+'''
+BASIS = 'sto-3g'
+SPIN = 0
+UNIT = 'angstrom'
+
+PCM_METHOD = 'C-PCM'
+EPS = 80.1510
+VDW_SCALE = 1.2
+LEBEDEV_ORDER = 17
+
+SCF_CONV_TOL = 1e-12
+SCF_CONV_TOL_GRAD = 1e-10
+
+HSTEP = 0.005   # Bohr
+VERBOSE = 4
+
+
+# ============================================================
+# Build reference molecule
+# ============================================================
+mol0 = gto.M(
+    atom=ATOM,
+    basis=BASIS,
+    spin=SPIN,
+    unit=UNIT,
+    verbose=VERBOSE,
+)
+
+coords0 = mol0.atom_coords(unit='B').copy()
+symbols = [mol0.atom_symbol(i) for i in range(mol0.natm)]
+natm = mol0.natm
+
+# fixed cavity coordinates for GC-HSM
+cavity_coords_ref = coords0.copy()
+
+
+# ============================================================
+# Helpers
+# ============================================================
+def make_hsm_pcm(mol):
+    pcm_obj = hsm.PCM(mol)
+    pcm_obj.cavity_coords = cavity_coords_ref.copy()   # fixed cavity
+    pcm_obj.method = PCM_METHOD
+    pcm_obj.eps = EPS
+    pcm_obj.vdw_scale = VDW_SCALE
+    pcm_obj.lebedev_order = LEBEDEV_ORDER
+    return pcm_obj
+
+
+def run_hsm_all(mol, verbose=0):
+    """Run RHF+GC-HSM and return mf, gradient, Hessian."""
+    mf = scf.RHF(mol).PCM(make_hsm_pcm(mol))
+    mf.verbose = verbose
+    mf.conv_tol = SCF_CONV_TOL
+    mf.conv_tol_grad = SCF_CONV_TOL_GRAD
+    mf.kernel()
+    if not mf.converged:
+        raise RuntimeError("HSM SCF did not converge")
+
+    grad = mf.nuc_grad_method().kernel()
+
+    # IMPORTANT:
+    # use HSM-specific Hessian object directly
+    hobj = hsm_hess.make_hess_object(mf)
+    hess = hobj.kernel()
+
+    return mf, grad, hess, hobj
+
+
+def run_vac_all(mol, verbose=0):
+    """Run vacuum RHF and return mf, gradient, Hessian."""
+    mf = scf.RHF(mol)
+    mf.verbose = verbose
+    mf.conv_tol = SCF_CONV_TOL
+    mf.conv_tol_grad = SCF_CONV_TOL_GRAD
+    mf.kernel()
+    if not mf.converged:
+        raise RuntimeError("Vacuum SCF did not converge")
+
+    grad = mf.nuc_grad_method().kernel()
+    hess = mf.Hessian().kernel()
+
+    return mf, grad, hess
+
+
+def numerical_hessian_from_grad(run_grad_func, coords_ref, hstep):
+    """Build numerical Hessian by central difference of analytic gradients."""
+    h_num = np.zeros((natm, natm, 3, 3))
+
+    for A in range(natm):
+        for x in range(3):
+            coords_p = coords_ref.copy()
+            coords_m = coords_ref.copy()
+            coords_p[A, x] += hstep
+            coords_m[A, x] -= hstep
+
+            mol_p = gto.M(
+                atom=[(symbols[i], coords_p[i]) for i in range(natm)],
+                basis=BASIS,
+                spin=SPIN,
+                unit='Bohr',
+                verbose=0,
+            )
+            mol_m = gto.M(
+                atom=[(symbols[i], coords_m[i]) for i in range(natm)],
+                basis=BASIS,
+                spin=SPIN,
+                unit='Bohr',
+                verbose=0,
+            )
+
+            g_p = run_grad_func(mol_p)
+            g_m = run_grad_func(mol_m)
+
+            h_num[A, :, x, :] = (g_p - g_m) / (2.0 * hstep)
+
+    return h_num
+
+
+def run_hsm_grad_only(mol):
+    mf = scf.RHF(mol).PCM(make_hsm_pcm(mol))
+    mf.verbose = 0
+    mf.conv_tol = SCF_CONV_TOL
+    mf.conv_tol_grad = SCF_CONV_TOL_GRAD
+    mf.kernel()
+    if not mf.converged:
+        raise RuntimeError("HSM SCF did not converge in gradient-only run")
+    return mf.nuc_grad_method().kernel()
+
+
+def run_vac_grad_only(mol):
+    mf = scf.RHF(mol)
+    mf.verbose = 0
+    mf.conv_tol = SCF_CONV_TOL
+    mf.conv_tol_grad = SCF_CONV_TOL_GRAD
+    mf.kernel()
+    if not mf.converged:
+        raise RuntimeError("Vacuum SCF did not converge in gradient-only run")
+    return mf.nuc_grad_method().kernel()
+
+
+def print_hessian_comparison(title, h_ana, h_num):
+    diff = h_ana - h_num
+    print("\n" + "=" * 72)
+    print(title)
+    print("=" * 72)
+    print("||H_ana||      =", np.linalg.norm(h_ana))
+    print("||H_num||      =", np.linalg.norm(h_num))
+    print("Max abs diff   =", np.max(np.abs(diff)))
+    print("RMS diff       =", np.sqrt(np.mean(diff**2)))
+
+    for A in range(natm):
+        for B in range(natm):
+            block = diff[A, B]
+            print(f"\nBlock ({A},{B}) max abs diff = {np.max(np.abs(block)):.12e}")
+            print(block)
+
+
+# ============================================================
+# 1. Analytical Hessians
+# ============================================================
+print("\nRunning reference analytical calculations...")
+mf_hsm0, g_hsm_ana, h_hsm_ana, hobj_hsm0 = run_hsm_all(mol0, verbose=VERBOSE)
+mf_vac0, g_vac_ana, h_vac_ana = run_vac_all(mol0, verbose=0)
+
+print("\nHSM Hessian object class:", type(hobj_hsm0))
+print("||de_solvent|| =", np.linalg.norm(hobj_hsm0.de_solvent))
+
+# solvent-only analytical Hessian
+h_solv_ana = h_hsm_ana - h_vac_ana
+
+
+# ============================================================
+# 2. Numerical Hessians from central difference of gradients
+# ============================================================
+print("\nBuilding numerical HSM Hessian...")
+h_hsm_num = numerical_hessian_from_grad(run_hsm_grad_only, coords0, HSTEP)
+
+print("\nBuilding numerical vacuum Hessian...")
+h_vac_num = numerical_hessian_from_grad(run_vac_grad_only, coords0, HSTEP)
+
+# solvent-only numerical Hessian
+h_solv_num = h_hsm_num - h_vac_num
+
+
+# ============================================================
+# 3. Comparisons
+# ============================================================
+print_hessian_comparison("Total HSM Hessian: analytical vs numerical", h_hsm_ana, h_hsm_num)
+print_hessian_comparison("Vacuum Hessian: analytical vs numerical", h_vac_ana, h_vac_num)
+print_hessian_comparison("Solvent-only Hessian: analytical vs numerical", h_solv_ana, h_solv_num)
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='nakailab63-gpu', release='6.14.0-28-generic', version='#28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 25 10:47:01 UTC 2', machine='x86_64')  Threads 4
+Python 3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:16:04) [GCC 11.2.0]
+numpy 1.26.4  scipy 1.17.0  h5py 3.15.1
+Date: Fri Mar 13 12:58:39 2026
+PySCF version 2.12.1
+PySCF path  /home/hashimoto/miniconda3/envs/hsm/lib/python3.12/site-packages/pyscf
+
+[ENV] PYSCF_EXT_PATH /home/hashimoto/miniconda3/envs/cpcm-gcm/lib/python3.10/site-packages/pyscf
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 3
+[INPUT] num. electrons = 10
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 0
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = angstrom
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr   0.0
+[INPUT]  2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr   0.0
+[INPUT]  3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr   0.0
+
+nuclear repulsion = 9.1088347312386
+number of shells = 5
+number of NR pGTOs = 21
+number of NR cGTOs = 7
+basis = sto-3g
+ecp = {}
+CPU time:         1.03
+
+Running reference analytical calculations...
+
+
+******** <class 'pyscf.solvent._attach_solvent.PCMRHF'> ********
+method = PCMRHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-12
+SCF conv_tol_grad = 1e-10
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmpxn9uhqbl
+max_memory 4000 MB (current use 101 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Initial guess from minao.
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.00306062852470334
+Solvent Energy = -0.00306062852470334
+init E= -74.8203510522404
+  HOMO = -0.349239766165448  LUMO = 0.460102360811827
+PCM E_diel = -0.0153927903568244
+Solvent Energy = -0.0153927903568244
+cycle= 1 E= -74.9287373981567  delta_E= -0.108  |g|= 0.332  |ddm|= 1.69
+  HOMO = -0.276196037177013  LUMO = 0.658551821253983
+PCM E_diel = -0.00642897512737461
+Solvent Energy = -0.00642897512737461
+cycle= 2 E= -74.9704132155318  delta_E= -0.0417  |g|= 0.0346  |ddm|=  0.5
+  HOMO = -0.387767303250434  LUMO = 0.616976212676188
+PCM E_diel = -0.00645014192531025
+Solvent Energy = -0.00645014192531025
+cycle= 3 E= -74.9707790703023  delta_E= -0.000366  |g|= 0.00807  |ddm|= 0.0382
+  HOMO = -0.38829007870599  LUMO = 0.6167925851368
+PCM E_diel = -0.00637340422484203
+Solvent Energy = -0.00637340422484203
+cycle= 4 E= -74.9708041925929  delta_E= -2.51e-05  |g|= 0.000153  |ddm|= 0.014
+  HOMO = -0.388239481537682  LUMO = 0.616739505129765
+PCM E_diel = -0.00637466014099593
+Solvent Energy = -0.00637466014099593
+cycle= 5 E= -74.9708042094939  delta_E= -1.69e-08  |g|= 4.25e-05  |ddm|= 0.000406
+  HOMO = -0.388234212334065  LUMO = 0.616751590072179
+PCM E_diel = -0.00637483634110529
+Solvent Energy = -0.00637483634110529
+cycle= 6 E= -74.9708042108082  delta_E= -1.31e-09  |g|= 1.63e-06  |ddm|= 0.000146
+  HOMO = -0.38823395889209  LUMO = 0.616749004706756
+PCM E_diel = -0.00637486961198414
+Solvent Energy = -0.00637486961198414
+cycle= 7 E= -74.9708042108096  delta_E= -1.45e-12  |g|= 9.33e-10  |ddm|= 4.36e-06
+  HOMO = -0.388233959179545  LUMO = 0.616749003772327
+PCM E_diel = -0.00637486962252331
+Solvent Energy = -0.00637486962252331
+cycle= 8 E= -74.9708042108096  delta_E= 4.26e-14  |g|= 4.76e-10  |ddm|= 9.77e-10
+  HOMO = -0.388233959278907  LUMO = 0.616749003457895
+PCM E_diel = -0.00637486962606931
+Solvent Energy = -0.00637486962606931
+cycle= 9 E= -74.9708042108096  delta_E= -4.26e-14  |g|= 3.23e-10  |ddm|= 3.29e-10
+  HOMO = -0.388233959356426  LUMO = 0.616749003508492
+PCM E_diel = -0.00637486962524348
+Solvent Energy = -0.00637486962524348
+cycle= 10 E= -74.9708042108096  delta_E= 1.42e-14  |g|= 3.67e-10  |ddm|= 1.67e-10
+  HOMO = -0.388233959571463  LUMO = 0.616749002766074
+PCM E_diel = -0.00637486963338524
+Solvent Energy = -0.00637486963338524
+cycle= 11 E= -74.9708042108096  delta_E= 1.42e-14  |g|= 3.18e-11  |ddm|= 7.86e-10
+  HOMO = -0.388233959479338  LUMO = 0.616749002800667
+PCM E_diel = -0.00637486963340711
+Solvent Energy = -0.00637486963340711
+Extra cycle  E= -74.9708042108096  delta_E=    0  |g|= 8.71e-12  |ddm|= 5.1e-11
+converged SCF energy = -74.9708042108096
+
+
+******** <class 'pyscf.solvent.grad.pcm.PCMGradients'> for <class 'pyscf.solvent._attach_solvent.PCMRHF'> ********
+unit = Eh/Bohr
+max_memory 4000 MB (current use 114 MB)
+--------------- PCMRHF (+PCM) gradients ---------------
+         x                y                z
+0 O     0.0000000000    -0.0000000000    -0.0356799433
+1 H    -0.0000000000    -0.0184706706     0.0181327569
+2 H     0.0000000000     0.0184706706     0.0181327569
+----------------------------------------------
+
+HSM Hessian object class: <class 'pyscf.solvent.hessian.hsm.PCMHessian'>
+||de_solvent|| = 0.07872878819981399
+
+Building numerical HSM Hessian...
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+
+Building numerical vacuum Hessian...
+
+========================================================================
+Total HSM Hessian: analytical vs numerical
+========================================================================
+||H_ana||      = 2.129530607637714
+||H_num||      = 2.1295330167382707
+Max abs diff   = 1.196881425180596e-05
+RMS diff       = 3.4050661049964132e-06
+
+Block (0,0) max abs diff = 1.196881425181e-05
+[[-6.68452840e-06 -7.57892141e-14  4.59221543e-13]
+ [ 8.03638485e-15 -7.83374282e-08 -1.11282189e-12]
+ [-3.88382130e-15 -9.21811192e-14  1.19688143e-05]]
+
+Block (0,1) max abs diff = 8.964942950385e-06
+[[ 3.33922576e-06 -1.67258233e-13  1.90226278e-13]
+ [-3.05103985e-15  4.41274348e-08 -8.96494295e-06]
+ [ 1.33200240e-14 -3.32912867e-06 -5.98982944e-06]]
+
+Block (0,2) max abs diff = 8.964943498335e-06
+[[ 3.33922574e-06  1.04183921e-13 -3.42965195e-15]
+ [-4.93084761e-15  4.41271579e-08  8.96494350e-06]
+ [-9.19719736e-15  3.32912862e-06 -5.98982948e-06]]
+
+Block (1,0) max abs diff = 9.104136536597e-06
+[[ 2.79663581e-06 -1.13870270e-14 -1.59726510e-12]
+ [ 6.82919885e-15  3.48528960e-07 -9.10413654e-06]
+ [-6.18846954e-15 -2.40071537e-06 -4.75551784e-06]]
+
+Block (1,1) max abs diff = 9.011794565972e-06
+[[-2.76693943e-06  1.21900087e-14  8.89486554e-13]
+ [-1.54491792e-14 -8.56498573e-07  9.01179457e-06]
+ [-8.36878914e-15  2.69604333e-06  4.53741481e-06]]
+
+Block (1,2) max abs diff = 5.476769108226e-07
+[[ 8.89848494e-09  1.87059468e-14  8.73961837e-13]
+ [ 8.83633200e-15  5.47676911e-07  1.01033823e-07]
+ [ 1.47020933e-14 -2.94990027e-07  2.41710530e-07]]
+
+Block (2,0) max abs diff = 9.104131537374e-06
+[[ 2.79663576e-06 -2.91519559e-14 -1.24616061e-12]
+ [ 1.93721919e-14  3.48310711e-07  9.10413154e-06]
+ [-1.35169705e-14  2.40071627e-06 -4.75551788e-06]]
+
+Block (2,1) max abs diff = 5.477821127878e-07
+[[ 8.89848711e-09  7.76993245e-14  7.10869491e-13]
+ [ 8.49661223e-15  5.47782113e-07 -1.00906306e-07]
+ [ 1.86480167e-14  2.94989606e-07  2.41710534e-07]]
+
+Block (2,2) max abs diff = 9.011916931201e-06
+[[-2.76693939e-06 -3.89288666e-14  7.74334560e-13]
+ [-2.82977981e-14 -8.56396352e-07 -9.01191693e-06]
+ [-5.19543405e-15 -2.69604384e-06  4.53741519e-06]]
+
+========================================================================
+Vacuum Hessian: analytical vs numerical
+========================================================================
+||H_ana||      = 2.1325581039657697
+||H_num||      = 2.1325604045521196
+Max abs diff   = 1.2115828545322671e-05
+RMS diff       = 3.4095068565632905e-06
+
+Block (0,0) max abs diff = 1.211582854532e-05
+[[-6.56394305e-06  2.90739413e-14  1.80005585e-16]
+ [-1.79738591e-14 -2.62922507e-08 -5.32853662e-13]
+ [-2.94089416e-15 -5.69517012e-14  1.21158285e-05]]
+
+Block (0,1) max abs diff = 8.966129436905e-06
+[[ 3.28197056e-06 -2.21530422e-14  8.86968340e-14]
+ [ 2.18356605e-14  1.31450569e-08 -8.96612944e-06]
+ [-9.56551031e-16 -3.25014175e-06 -6.05791238e-06]]
+
+Block (0,2) max abs diff = 8.966129726007e-06
+[[ 3.28197061e-06 -2.22524918e-14  2.21454629e-14]
+ [-3.86180140e-15  1.31449900e-08  8.96612973e-06]
+ [ 3.89744519e-15  3.25014155e-06 -6.05791256e-06]]
+
+Block (1,0) max abs diff = 9.115177004526e-06
+[[ 2.78528640e-06 -1.49796922e-13 -2.22055454e-12]
+ [ 1.03651353e-15  3.11644795e-07 -9.11517700e-06]
+ [ 1.53662849e-14 -2.35587534e-06 -4.79532348e-06]]
+
+Block (1,1) max abs diff = 9.013128105861e-06
+[[-2.79996831e-06  1.33176541e-13  1.17694172e-12]
+ [-7.88118278e-15 -8.63769766e-07  9.01312811e-06]
+ [-1.73859287e-14  2.65807196e-06  4.53760282e-06]]
+
+Block (1,2) max abs diff = 5.521248645571e-07
+[[ 1.46819012e-08  2.22219793e-14  1.08802174e-12]
+ [ 6.84466925e-15  5.52124865e-07  1.02048544e-07]
+ [ 2.01964381e-15 -3.02196886e-07  2.57720370e-07]]
+
+Block (2,0) max abs diff = 9.115176116570e-06
+[[ 2.78528639e-06  8.32492692e-14  1.82069425e-12]
+ [-3.41982636e-14  3.11645021e-07  9.11517612e-06]
+ [-4.94707222e-15  2.35587512e-06 -4.79532517e-06]]
+
+Block (2,1) max abs diff = 5.521248867615e-07
+[[ 1.46819099e-08 -2.66454722e-13 -7.99344886e-13]
+ [ 2.01778094e-14  5.52124887e-07 -1.02048277e-07]
+ [-5.44945456e-15  3.02196664e-07  2.57721036e-07]]
+
+Block (2,2) max abs diff = 9.013127861168e-06
+[[-2.79996830e-06  1.77666196e-13 -7.99304759e-13]
+ [ 1.40204542e-14 -8.63769881e-07 -9.01312786e-06]
+ [ 1.03965268e-14 -2.65807185e-06  4.53760367e-06]]
+
+========================================================================
+Solvent-only Hessian: analytical vs numerical
+========================================================================
+||H_ana||      = 0.01311716116793226
+||H_num||      = 0.013117228333739685
+Max abs diff   = 1.470142935167118e-07
+RMS diff       = 3.246791087592672e-08
+
+Block (0,0) max abs diff = 1.470142935167e-07
+[[-1.20585345e-07 -1.04863155e-13  4.59041537e-13]
+ [ 2.60102439e-14 -5.20451775e-08 -5.79968229e-13]
+ [-9.42927139e-16 -3.52294180e-14 -1.47014294e-07]]
+
+Block (0,1) max abs diff = 7.898692039321e-08
+[[ 5.72551985e-08 -1.45105191e-13  1.01529444e-13]
+ [-2.48867003e-14  3.09823779e-08  1.18648652e-09]
+ [ 1.42765751e-14 -7.89869204e-08  6.80829396e-08]]
+
+Block (0,2) max abs diff = 7.898707404808e-08
+[[ 5.72551219e-08  1.26436413e-13 -2.55751148e-14]
+ [-1.06904622e-15  3.09821679e-08 -1.18622767e-09]
+ [-1.30946426e-14  7.89870740e-08  6.80830847e-08]]
+
+Block (1,0) max abs diff = 4.484003773841e-08
+[[ 1.13494051e-08  1.38409895e-13  6.23289448e-13]
+ [ 5.79268531e-15  3.68841654e-08  1.10404679e-08]
+ [-2.15547544e-14 -4.48400377e-08  3.98056473e-08]]
+
+Block (1,1) max abs diff = 3.797137210215e-08
+[[ 3.30288780e-08 -1.20986532e-13 -2.87455168e-13]
+ [-7.56799637e-15  7.27119320e-09 -1.33353989e-09]
+ [ 9.01713957e-15  3.79713721e-08 -1.88014826e-10]]
+
+Block (1,2) max abs diff = 1.600984020703e-08
+[[-5.78341627e-09 -3.51603252e-15 -2.14059906e-13]
+ [ 1.99166275e-15 -4.44795373e-09 -1.01472075e-09]
+ [ 1.26824495e-14  7.20685843e-09 -1.60098402e-08]]
+
+Block (2,0) max abs diff = 4.484114835002e-08
+[[ 1.13493729e-08 -1.12401225e-13 -3.06685486e-12]
+ [ 5.35704555e-14  3.66656900e-08 -1.10445792e-08]
+ [-8.56989826e-15  4.48411484e-08  3.98072919e-08]]
+
+Block (2,1) max abs diff = 1.601050217404e-08
+[[-5.78342281e-09  3.44154047e-13  1.51021438e-12]
+ [-1.16811972e-14 -4.34277397e-09  1.14197061e-09]
+ [ 2.40974713e-14 -7.20705802e-09 -1.60105022e-08]]
+
+Block (2,2) max abs diff = 3.797199571443e-08
+[[ 3.30289083e-08 -2.16595063e-13  1.57363932e-12]
+ [-4.23182523e-14  7.37352912e-09  1.21092997e-09]
+ [-1.55919608e-14 -3.79719957e-08 -1.88479676e-10]]

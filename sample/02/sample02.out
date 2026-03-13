@@ -1,0 +1,307 @@
+#INFO: **** input file is /work/hashimoto/python_job.1374/sample02.py ****
+#!/usr/bin/env python
+import numpy as np
+from pyscf import gto, scf
+from pyscf.solvent import hsm
+
+# -------------------------
+# Settings
+# -------------------------
+atom = '''
+O   0.00000000000000   0.00000000000000   0.06865240486852
+H   0.00000000000000   0.74760659813079  -0.54482630232708
+H   0.00000000000000  -0.74760659813079  -0.54482630232708
+'''
+basis = 'sto-3g'
+spin = 0
+unit = 'angstrom'
+
+eps = 80.1510
+vdw_scale = 1.2
+lebedev_order = 17
+pcm_method = 'C-PCM'
+
+# finite-difference step for Hessian
+# HSM Hessian check is usually more stable with 0.005 or 0.01 Bohr
+hstep = 0.005
+
+# -------------------------
+# Reference molecule
+# -------------------------
+mol0 = gto.M(
+    atom=atom,
+    basis=basis,
+    spin=spin,
+    unit=unit,
+    verbose=4,
+)
+
+cavity_coords_ref = mol0.atom_coords(unit='B').copy()
+symbols = [mol0.atom_symbol(i) for i in range(mol0.natm)]
+coords0 = mol0.atom_coords(unit='B').copy()
+natm = mol0.natm
+
+
+def make_pcm(mol):
+    pcm_obj = hsm.PCM(mol)
+    pcm_obj.cavity_coords = cavity_coords_ref.copy()
+    pcm_obj.method = pcm_method
+    pcm_obj.eps = eps
+    pcm_obj.vdw_scale = vdw_scale
+    pcm_obj.lebedev_order = lebedev_order
+    return pcm_obj
+
+
+def run_grad(mol, verbose=0):
+    mf = scf.RHF(mol).PCM(make_pcm(mol))
+    mf.verbose = verbose
+    mf.conv_tol = 1e-12
+    mf.conv_tol_grad = 1e-10
+    mf.kernel()
+    if not mf.converged:
+        raise RuntimeError("SCF did not converge")
+    g = mf.nuc_grad_method().kernel()
+    return g, mf
+
+
+# -------------------------
+# Analytical Hessian
+# -------------------------
+mf0 = scf.RHF(mol0).PCM(make_pcm(mol0))
+mf0.conv_tol = 1e-12
+mf0.conv_tol_grad = 1e-10
+mf0.kernel()
+if not mf0.converged:
+    raise RuntimeError("Reference SCF did not converge")
+
+h_anal = mf0.Hessian().kernel()   # shape = (natm,natm,3,3)
+
+# -------------------------
+# Numerical Hessian from central difference of gradients
+# -------------------------
+h_num = np.zeros((natm, natm, 3, 3))
+
+for A in range(natm):
+    for x in range(3):
+        coords_p = coords0.copy()
+        coords_m = coords0.copy()
+        coords_p[A, x] += hstep
+        coords_m[A, x] -= hstep
+
+        mol_p = gto.M(
+            atom=[(symbols[i], coords_p[i]) for i in range(natm)],
+            basis=basis,
+            spin=spin,
+            unit='Bohr',
+            verbose=0,
+        )
+        mol_m = gto.M(
+            atom=[(symbols[i], coords_m[i]) for i in range(natm)],
+            basis=basis,
+            spin=spin,
+            unit='Bohr',
+            verbose=0,
+        )
+
+        g_p, _ = run_grad(mol_p, verbose=0)
+        g_m, _ = run_grad(mol_m, verbose=0)
+
+        # d g(B,y) / d R(A,x)
+        h_num[A, :, x, :] = (g_p - g_m) / (2.0 * hstep)
+
+# -------------------------
+# Compare
+# -------------------------
+diff = h_anal - h_num
+
+print("\n=== Hessian comparison ===")
+print("Max abs diff :", np.max(np.abs(diff)))
+print("RMS diff     :", np.sqrt(np.mean(diff**2)))
+print("||H_anal||    :", np.linalg.norm(h_anal))
+print("||H_num||     :", np.linalg.norm(h_num))
+
+for A in range(natm):
+    for B in range(natm):
+        block_diff = diff[A, B]
+        print(f"\nBlock ({A},{B}) max abs diff = {np.max(np.abs(block_diff)):.12e}")
+        print(block_diff)
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='nakailab63-gpu', release='6.14.0-28-generic', version='#28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 25 10:47:01 UTC 2', machine='x86_64')  Threads 4
+Python 3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:16:04) [GCC 11.2.0]
+numpy 1.26.4  scipy 1.17.0  h5py 3.15.1
+Date: Fri Mar 13 11:05:16 2026
+PySCF version 2.12.1
+PySCF path  /home/hashimoto/miniconda3/envs/hsm/lib/python3.12/site-packages/pyscf
+
+[ENV] PYSCF_EXT_PATH /home/hashimoto/miniconda3/envs/cpcm-gcm/lib/python3.10/site-packages/pyscf
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 3
+[INPUT] num. electrons = 10
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 0
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = angstrom
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 O      0.000000000000   0.000000000000   0.068652404869 AA    0.000000000000   0.000000000000   0.129734242994 Bohr   0.0
+[INPUT]  2 H      0.000000000000   0.747606598131  -0.544826302327 AA    0.000000000000   1.412771719385  -1.029572496858 Bohr   0.0
+[INPUT]  3 H      0.000000000000  -0.747606598131  -0.544826302327 AA    0.000000000000  -1.412771719385  -1.029572496858 Bohr   0.0
+
+nuclear repulsion = 9.1088347312386
+number of shells = 5
+number of NR pGTOs = 21
+number of NR cGTOs = 7
+basis = sto-3g
+ecp = {}
+CPU time:         1.03
+
+
+******** <class 'pyscf.solvent._attach_solvent.PCMRHF'> ********
+method = PCMRHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-12
+SCF conv_tol_grad = 1e-10
+SCF max_cycles = 50
+direct_scf = True
+direct_scf_tol = 1e-13
+chkfile to save SCF result = /tmp/tmph1n6_f1f
+max_memory 4000 MB (current use 101 MB)
+******** <class 'pyscf.solvent.hsm.PCM'> (In testing) ********
+
+WARN: PCM is an experimental feature. It is still in testing.
+Features and APIs may be changed in the future.
+
+lebedev_order = 17 (110 grids per sphere)
+eps = 80.151
+frozen = False
+Initial guess from minao.
+Surface area [Bohr**2] = 165.243967192
+PCM E_diel = -0.00306062852470333
+Solvent Energy = -0.00306062852470333
+init E= -74.8203510522404
+  HOMO = -0.349239766165448  LUMO = 0.460102360811827
+PCM E_diel = -0.0153927903568244
+Solvent Energy = -0.0153927903568244
+cycle= 1 E= -74.9287373981567  delta_E= -0.108  |g|= 0.332  |ddm|= 1.69
+  HOMO = -0.276196037177013  LUMO = 0.658551821253985
+PCM E_diel = -0.00642897512737464
+Solvent Energy = -0.00642897512737464
+cycle= 2 E= -74.9704132155318  delta_E= -0.0417  |g|= 0.0346  |ddm|=  0.5
+  HOMO = -0.387767303250435  LUMO = 0.616976212676184
+PCM E_diel = -0.00645014192531027
+Solvent Energy = -0.00645014192531027
+cycle= 3 E= -74.9707790703023  delta_E= -0.000366  |g|= 0.00807  |ddm|= 0.0382
+  HOMO = -0.388290078705991  LUMO = 0.616792585136802
+PCM E_diel = -0.00637340422484212
+Solvent Energy = -0.00637340422484212
+cycle= 4 E= -74.970804192593  delta_E= -2.51e-05  |g|= 0.000153  |ddm|= 0.014
+  HOMO = -0.388239481537679  LUMO = 0.616739505129766
+PCM E_diel = -0.00637466014099581
+Solvent Energy = -0.00637466014099581
+cycle= 5 E= -74.9708042094939  delta_E= -1.69e-08  |g|= 4.25e-05  |ddm|= 0.000406
+  HOMO = -0.388234212334061  LUMO = 0.616751590072129
+PCM E_diel = -0.00637483634110522
+Solvent Energy = -0.00637483634110522
+cycle= 6 E= -74.9708042108082  delta_E= -1.31e-09  |g|= 1.63e-06  |ddm|= 0.000146
+  HOMO = -0.388233958892018  LUMO = 0.616749004705995
+PCM E_diel = -0.00637486961199353
+Solvent Energy = -0.00637486961199353
+cycle= 7 E= -74.9708042108096  delta_E= -1.44e-12  |g|= 9.32e-10  |ddm|= 4.36e-06
+  HOMO = -0.388233959179533  LUMO = 0.616749003772242
+PCM E_diel = -0.00637486962252446
+Solvent Energy = -0.00637486962252446
+cycle= 8 E= -74.9708042108096  delta_E= 4.26e-14  |g|= 4.76e-10  |ddm|= 9.76e-10
+  HOMO = -0.388233959278876  LUMO = 0.616749003457609
+PCM E_diel = -0.00637486962607302
+Solvent Energy = -0.00637486962607302
+cycle= 9 E= -74.9708042108096  delta_E= -2.84e-14  |g|= 3.22e-10  |ddm|= 3.29e-10
+  HOMO = -0.388233959356392  LUMO = 0.616749003508492
+PCM E_diel = -0.00637486962524422
+Solvent Energy = -0.00637486962524422
+cycle= 10 E= -74.9708042108095  delta_E= 7.11e-14  |g|= 3.67e-10  |ddm|= 1.67e-10
+  HOMO = -0.388233959571434  LUMO = 0.616749002766077
+PCM E_diel = -0.00637486963338561
+Solvent Energy = -0.00637486963338561
+cycle= 11 E= -74.9708042108096  delta_E= -7.11e-14  |g|= 3.18e-11  |ddm|= 7.86e-10
+  HOMO = -0.388233959479335  LUMO = 0.616749002800659
+PCM E_diel = -0.0063748696334072
+Solvent Energy = -0.0063748696334072
+Extra cycle  E= -74.9708042108096  delta_E=    0  |g|= 8.7e-12  |ddm|= 5.09e-11
+converged SCF energy = -74.9708042108096
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+Surface area [Bohr**2] = 165.243967192
+
+=== Hessian comparison ===
+Max abs diff : 0.0032249486045730635
+RMS diff     : 0.0013211442495370254
+||H_anal||    : 2.1194196554810905
+||H_num||     : 2.129533016687507
+
+Block (0,0) max abs diff = 1.600420026479e-03
+[[ 4.60483655e-04 -6.82769289e-15 -2.95885379e-12]
+ [ 1.46691950e-14 -7.57831475e-04 -6.45255857e-13]
+ [ 1.02027873e-14 -8.07983269e-14 -1.60042003e-03]]
+
+Block (0,1) max abs diff = 2.404330301965e-03
+[[-2.74312736e-04  1.45668215e-13  1.17422959e-12]
+ [-1.98389701e-14  1.94799570e-03 -1.86858454e-03]
+ [-1.90328942e-14 -1.44845848e-03  2.40433030e-03]]
+
+Block (0,2) max abs diff = 2.404330301825e-03
+[[-2.74312736e-04  9.75742243e-14  1.23783984e-12]
+ [ 4.66261519e-15  1.94799570e-03  1.86858454e-03]
+ [ 8.67156318e-15  1.44845848e-03  2.40433030e-03]]
+
+Block (1,0) max abs diff = 2.405564613030e-03
+[[-2.74855326e-04  2.40510516e-14  2.55477806e-13]
+ [-3.07772030e-14  1.94829995e-03 -1.45423350e-03]
+ [-3.06778014e-14 -1.86202031e-03  2.40556461e-03]]
+
+Block (1,1) max abs diff = 3.224948604573e-03
+[[ 2.59264434e-04 -3.42472532e-14 -2.03095870e-13]
+ [ 5.60698115e-15 -2.66507939e-03  3.12779244e-03]
+ [ 1.54915910e-14  3.12147658e-03 -3.22494860e-03]]
+
+Block (1,2) max abs diff = 8.052424218147e-04
+[[ 5.99221273e-05 -7.35610717e-14 -2.39732543e-13]
+ [ 2.49550974e-14 -8.05242422e-04  2.92542070e-04]
+ [ 1.51238174e-14 -2.92736134e-04 -7.84316141e-04]]
+
+Block (2,0) max abs diff = 2.405564612553e-03
+[[-2.74855326e-04 -3.84874322e-14  1.12824618e-12]
+ [-2.66645089e-14  1.94829987e-03  1.45423349e-03]
+ [-9.64970040e-16  1.86202031e-03  2.40556461e-03]]
+
+Block (2,1) max abs diff = 8.052423775268e-04
+[[ 5.99221272e-05  1.76428211e-14 -4.45165876e-13]
+ [ 2.57327469e-14 -8.05242378e-04 -2.92542045e-04]
+ [-1.07898334e-15  2.92736134e-04 -7.84316141e-04]]
+
+Block (2,2) max abs diff = 3.224948604438e-03
+[[ 2.59264434e-04  1.49110602e-13 -3.40645621e-13]
+ [ 8.29073168e-16 -2.66507935e-03 -3.12779246e-03]
+ [ 2.21538668e-15 -3.12147658e-03 -3.22494860e-03]]
